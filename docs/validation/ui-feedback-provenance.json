@@ -1,0 +1,53 @@
+{
+  "date_utc": "2026-10-20",
+  "base_merge_commit": "40cfa7d0334e0fbb332e76b63c4d6652af8bfda8",
+  "description": "Source hashes after the separate startup/sidebar feedback fixes. Before image uses the base merge source; after images use the current runtime source. Tests added after capture do not change runtime behavior.",
+  "sha256": {
+    "Cargo.toml": "a778b59edc56731fcbaa827f5ada246113d96541d79515f582189f2424d8b6a5",
+    "Cargo.lock": "4089b41b12b9661b093a547bd6c6456649eea77d06ff987edfc866c02639709a",
+    "src/app.rs": "90f37cdc39323b4fcc52b4e1ef193dca9bb8b0da9f1adb666f1aeff3f8a09023",
+    "src/app_safety_tests.rs": "03c87038d7fa85bc7851bb60ffa7c8b67cae365f0292bd90b988cdca1139bf94",
+    "src/app_vim.rs": "ea6db9660d5ef299c976a1e603cd5802aae32c75a3760f31c970e8359a2251f0",
+    "src/brackets.rs": "6c740d6d4b5d658e56a144ae398f3c78f13ee241bc97cda1c76087c4cdd3caed",
+    "src/document.rs": "65b329502dcfd004b068aed8cddf6f0406b19f1ba927cc2cb553006ae9a15118",
+    "src/file_io.rs": "62a16ed4bd2c8e558739366afdc7f16103fab10e3860700973909e2c1066d097",
+    "src/headless.rs": "045d1eb65fdbaf323f4158299bbd36abe6302fc6f0a447895488008384d3be3e",
+    "src/lib.rs": "f4f3f69c60c326dc30920189fd43a658325ed7d924afcf705034c676ae18a39b",
+    "src/main.rs": "c666f82310e0705afd4209f1361a5256fc7aa54488f0645bb8e04fd5aeb3509a",
+    "src/preferences.rs": "ae5263000b76591d41cbdf2d5c856a44beaea207b9cd67f4a7ab441beca88f8b",
+    "src/project_tree.rs": "ef64f6fba6f2bb77b159f03f4aa3e1b0c242da8ea8ed3d9e9995c806e310a32f",
+    "src/search.rs": "e5d50157ee064faab875cd94b849c3560c66bbb8477ccb29001b0717f4ad1952",
+    "src/syntax.rs": "69d41896a4c01c6600b6e23243715212a967cd4d548234486b67753ff171fbeb",
+    "src/view.rs": "9f54d4b9ba6bcf95bfe7c017dcf7cf4d404535f2f744407c61b862c0c99e7954",
+    "src/vim.rs": "5d8c5515eea8870ec627d19b46dc123f116e96e3d959bcc4b673463294d7ec9d",
+    "src/workspace.rs": "b92990f44ce1176d03f89878b4b9d3dfb0b25fc6960d573ea794122b996accdf",
+    "src/workspace_regression_tests.rs": "e2ce0a5724d02fa59aac5daa92ff9bb941889bbb47a5fa06653748a825700d21",
+    "tests/document_randomized.rs": "16fd2eb09a33182d7fc082f622ecf3d606ed1daa3404cceef7b3b7772de29969",
+    "tests/large_file.rs": "48aa5693960cbb722ecb0adb3efc48536450bcd6229816766c4df620e6c931b9"
+  },
+  "captures_sha256": {
+    "docs/images/sidebar-before.png": "049723bda36f6913e1cbe9b2788929b7825378be392449a72ff4d6b3f2eca32f",
+    "docs/images/simptxt.png": "a441e0bfed3ab79d7809975af3a28e06eda0cd5a6c757cecca0fa3d7a8824b73",
+    "docs/images/simptxt-light.png": "83cfb433dbf2742b917f7802c214167cafe91f9573bc2e21b66e4394213ead3b",
+    "docs/images/startup-warning.png": "7cec23ec51c74989f874575238f3f5db701599e5c1b43bb9e589f49115f4f039"
+  },
+  "checks": {
+    "default_features_passed": 188,
+    "no_default_features_passed": 88,
+    "expensive_opt_in_tests_ignored": 3,
+    "format": "pass",
+    "strict_clippy": "pass",
+    "build": "pass",
+    "sample_cpp17_strict_compile_and_exit": "pass",
+    "missing_startup_path_created": false
+  },
+  "rendering": {
+    "dimensions": [
+      1280,
+      800
+    ],
+    "adapter": "llvmpipe LLVM 19.1.7 Vulkan",
+    "native_window": false,
+    "frames_per_capture": 5
+  }
+}

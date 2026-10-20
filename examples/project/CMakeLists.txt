@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+project(SimpTxtExample LANGUAGES CXX)
+add_executable(sensor_preview src/main.cpp)
+target_compile_features(sensor_preview PRIVATE cxx_std_17)
+target_include_directories(sensor_preview PRIVATE include)

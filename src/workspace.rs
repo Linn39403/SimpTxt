@@ -58,13 +58,32 @@ pub struct WorkspaceApp {
     quitting: Option<QuitState>,
     allow_close: bool,
     suppress_input: bool,
+    startup_warning: Option<String>,
+    startup_load: Option<(TabId, u64)>,
 }
 
 impl WorkspaceApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, smoke: bool) -> Self {
-        let mut app = Self::create(&cc.egui_ctx, smoke);
+        Self::from_startup_path(&cc.egui_ctx, path, smoke)
+    }
+
+    /// Startup failures are recoverable without dismissing a modal first.
+    /// Keep this path shared with native startup so it can be exercised without
+    /// a native window or a platform file picker.
+    pub(crate) fn from_startup_path(
+        ctx: &egui::Context,
+        path: Option<PathBuf>,
+        smoke: bool,
+    ) -> Self {
+        let mut app = Self::create(ctx, smoke);
         if let Some(path) = path {
-            app.open_path(path, &cc.egui_ctx);
+            app.open_path(path, ctx);
+            let index = app.active_index();
+            if let Some(error) = app.tabs[index].editor.error.take() {
+                app.recover_startup_tab(index, error, ctx);
+            } else if app.tabs[index].editor.work.is_some() {
+                app.startup_load = Some((app.active, app.tabs[index].editor.generation));
+            }
         }
         app
     }
@@ -90,6 +109,46 @@ impl WorkspaceApp {
             quitting: None,
             allow_close: false,
             suppress_input: false,
+            startup_warning: None,
+            startup_load: None,
+        }
+    }
+
+    fn recover_startup_tab(&mut self, index: usize, error: String, ctx: &egui::Context) {
+        let error = match self.tabs[index].editor.path.as_ref() {
+            Some(path) => format!("Cannot open {}: {error}", path.display()),
+            None => error,
+        };
+        // A failed initial preview must not become a loaded document or acquire
+        // a save destination. Dropping it also cancels its jobs and isolates any
+        // late completion on the discarded receiver.
+        let mut editor = EditorApp::create(ctx, false);
+        editor.workspace_managed = true;
+        editor.preferences = self.preferences;
+        editor.vim_enabled = self.vim_enabled;
+        self.tabs[index].editor = editor;
+        self.preferences.apply_theme(ctx);
+        self.startup_load = None;
+        self.startup_warning = Some(error);
+    }
+
+    fn finish_startup_open(&mut self, ctx: &egui::Context) {
+        let Some((id, generation)) = self.startup_load else {
+            return;
+        };
+        let Some(index) = self.index(id) else {
+            self.startup_load = None;
+            return;
+        };
+        let editor = &mut self.tabs[index].editor;
+        if editor.generation != generation || editor.ready {
+            // A later Open/Reload owns its own errors and safety dialogs.
+            self.startup_load = None;
+        } else if editor.work.is_none() {
+            self.startup_load = None;
+            if let Some(error) = editor.error.take() {
+                self.recover_startup_tab(index, error, ctx);
+            }
         }
     }
 
@@ -549,6 +608,7 @@ impl WorkspaceApp {
         for tab in &mut self.tabs {
             tab.editor.poll(ctx);
         }
+        self.finish_startup_open(ctx);
         while let Ok(WorkspaceMessage::Folder(path)) = self.rx.try_recv() {
             self.folder_dialog_pending = false;
             self.suppress_input = true;
@@ -712,6 +772,31 @@ impl WorkspaceApp {
         }
     }
 
+    fn startup_banner(&mut self, root: &mut egui::Ui) {
+        let Some(warning) = self.startup_warning.as_ref() else {
+            return;
+        };
+        let mut dismiss = false;
+        egui::Panel::top("startup_warning").show(root, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Could not open the startup file")
+                        .strong()
+                        .color(self.preferences.palette().warning),
+                );
+                dismiss = ui.small_button("Dismiss").clicked();
+            });
+            ui.add(egui::Label::new(warning).truncate())
+                .on_hover_text(warning);
+            ui.label(
+                "A blank Untitled tab is ready. Keep editing, choose New, or Open another file. The failed open did not create a file.",
+            );
+        });
+        if dismiss {
+            self.startup_warning = None;
+        }
+    }
+
     pub(crate) fn headless(ctx: &egui::Context, path: &Path) -> Self {
         let mut app = Self::create(ctx, false);
         app.open_path(path.to_path_buf(), ctx);
@@ -727,6 +812,7 @@ impl WorkspaceApp {
             .iter()
             .all(|tab| tab.editor.ready && tab.editor.work.is_none())
             && self.tabs[self.active_index()].editor.ready_to_capture()
+            && self.project.is_settled()
     }
 
     pub(crate) fn headless_exercise(&mut self, ctx: &egui::Context, step: usize) {
@@ -758,6 +844,9 @@ impl WorkspaceApp {
             self.open_path(path, ctx);
         }
         self.switch_to(original_active);
+        if let Some(path) = self.active_editor().path.clone() {
+            self.project.reveal_file(&path);
+        }
         for tab in &mut self.tabs {
             tab.editor.preferences = self.preferences;
             tab.editor.vim_enabled = vim;
@@ -800,6 +889,7 @@ impl WorkspaceApp {
         }
         self.controls(root);
         self.tab_bar(root);
+        self.startup_banner(root);
         let mut selected_path = None;
         if self.project.root().is_some() {
             let panel = egui::Panel::left("project_sidebar")

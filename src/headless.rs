@@ -19,6 +19,7 @@ pub(crate) struct CaptureOptions {
     pub folder: Option<PathBuf>,
     pub tabs: Vec<PathBuf>,
     pub cursor_byte: Option<usize>,
+    pub startup_warning: bool,
 }
 
 pub(crate) fn screenshot(
@@ -27,8 +28,16 @@ pub(crate) fn screenshot(
     benchmark: bool,
     options: CaptureOptions,
 ) -> Result<(), Box<dyn Error>> {
-    // Fail early for a missing fixture rather than silently capturing an error UI.
-    let input_bytes = std::fs::metadata(input)?.len();
+    if benchmark && options.startup_warning {
+        return Err("Startup-warning capture is not a file benchmark".into());
+    }
+    // Normal capture fails early for a missing fixture. Only the explicit
+    // startup-warning diagnostic renders native startup's recovery behavior.
+    let input_bytes = if options.startup_warning {
+        std::fs::metadata(input).map_or(0, |metadata| metadata.len())
+    } else {
+        std::fs::metadata(input)?.len()
+    };
     let mut instance_options = wgpu::InstanceDescriptor::new_without_display_handle();
     instance_options.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
     let instance = wgpu::Instance::new(instance_options);
@@ -64,7 +73,11 @@ pub(crate) fn screenshot(
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(1.0);
     let started = Instant::now();
-    let mut app = WorkspaceApp::headless(&ctx, input);
+    let mut app = if options.startup_warning {
+        WorkspaceApp::from_startup_path(&ctx, Some(input.to_path_buf()), false)
+    } else {
+        WorkspaceApp::headless(&ctx, input)
+    };
     app.configure_capture(
         options.theme,
         options.vim,
@@ -268,4 +281,42 @@ pub(crate) fn screenshot(
         output.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_warning_capture_cannot_be_reported_as_a_file_benchmark() {
+        let options = CaptureOptions {
+            startup_warning: true,
+            ..Default::default()
+        };
+        let error = screenshot(
+            Path::new("not-written.png"),
+            Path::new("not-opened.txt"),
+            true,
+            options,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Startup-warning capture is not a file benchmark"
+        );
+    }
+
+    #[test]
+    fn normal_capture_rejects_missing_fixture_before_rendering_or_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("missing.txt");
+        let output = temp.path().join("not-written.png");
+        let error = screenshot(&output, &input, false, CaptureOptions::default()).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(!input.exists());
+        assert!(!output.exists());
+    }
 }

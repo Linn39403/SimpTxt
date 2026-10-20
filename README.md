@@ -12,7 +12,7 @@ A minimalist desktop text editor focused on opening files quickly, editing safel
 
 ![SimpTxt light theme with the same file and workspace](docs/images/simptxt-light.png)
 
-*Actual SimpTxt application rendered headlessly using its shared editor UI and egui/wgpu renderer, opening [`examples/welcome.rs`](examples/welcome.rs). This is not a mockup. Offscreen rendering does not validate native window integration or OS input methods.*
+*Actual SimpTxt application rendered headlessly using its shared editor UI and egui/wgpu renderer, opening [`examples/project/src/main.cpp`](examples/project/src/main.cpp). This is not a mockup. Offscreen rendering does not validate native window integration or OS input methods.*
 
 ## Focus
 
@@ -25,7 +25,7 @@ A minimalist desktop text editor focused on opening files quickly, editing safel
 - Immediate bounded preview, followed by background UTF-8 validation and indexing. The preview is read-only until editing is ready.
 - A chunked text core, bounded viewport rendering, and background search/highlighting/save work.
 
-See [REQUIREMENTS.md](REQUIREMENTS.md) for the agreed scope, provisional performance targets, assumptions, and acceptance plan. See [workspace validation](docs/workspace-validation.md) for this branch and [baseline large-file results](docs/validation.md) for earlier measurements and remaining gaps.
+See [REQUIREMENTS.md](REQUIREMENTS.md) for the agreed scope, provisional performance targets, assumptions, and acceptance plan. See [startup/sidebar feedback validation](docs/ui-feedback-validation.md), [workspace validation](docs/workspace-validation.md) for the earlier feature set and [baseline large-file results](docs/validation.md) for earlier measurements and remaining gaps.
 
 Three real 1 GB fixture families (source, logs, and a giant single line) passed the local core open/edit/undo/save/reopen pipeline. These were single uncontrolled-cache trials, not GUI latency or cross-platform acceptance results.
 
@@ -39,10 +39,10 @@ For an existing clone, update the original feature branch before building:
 git fetch origin
 git switch feature/minimal-editor
 git pull --ff-only
-cargo run --locked --release -- path/to/file.rs
+cargo run --locked --release
 ```
 
-Omit the file argument to start with a new document. Linux also requires the native windowing libraries listed in [the CI workflow](.github/workflows/ci.yml).
+This command opens a new untitled document. To open the checked-in sample instead, use `cargo run --locked --release -- examples/welcome.rs`. A supplied path must name a real file; a missing startup path does not create one. Linux also requires the native windowing libraries listed in [the CI workflow](.github/workflows/ci.yml).
 
 Common shortcuts use Ctrl on Windows/Linux and Command on macOS:
 
@@ -55,7 +55,7 @@ Common shortcuts use Ctrl on Windows/Linux and Command on macOS:
 
 Use **Light theme** / **Dark theme** in the top toolbar to switch the entire interface without changing the documents. Text zoom is shared across tabs and bounded to 9–36 px.
 
-Use **Open folder…** for the sidebar. Reopening a file focuses its existing tab, preserving unsaved edits; Save As refuses a destination already owned by another tab. Closing the window walks all unsaved tabs. Cancelling quit retains every tab, including tabs whose discard decision had already been made for that quit attempt.
+Use **Open folder…** for the sidebar. Folder arrows and open/closed folder icons are painted shapes, not icon-font glyphs. Source-file badges distinguish C/C++, headers, Rust, Python, JSON, TOML and CMake; unknown types use a generic document icon. Hover the project name to see its full path. Reopening a file focuses its existing tab, preserving unsaved edits; Save As refuses a destination already owned by another tab. Closing the window walks all unsaved tabs. Cancelling quit retains every tab, including tabs whose discard decision had already been made for that quit attempt.
 
 ### Optional Vim-style mode
 
@@ -106,13 +106,15 @@ The default family is `source`. Set `SIMPTXT_FIXTURE_FAMILY=logs` or `SIMPTXT_FI
 ### Reproduce the screenshot
 
 ```sh
-cargo run --locked -- --headless-screenshot docs/images/simptxt.png examples/welcome.rs \
-  --vim --folder src --tab Cargo.toml --cursor-byte 204
-cargo run --locked -- --headless-screenshot docs/images/simptxt-light.png examples/welcome.rs \
-  --light --vim --folder src --tab Cargo.toml --cursor-byte 204
+cargo run --locked -- --headless-screenshot docs/images/simptxt.png examples/project/src/main.cpp \
+  --vim --folder examples/project --tab examples/welcome.rs --cursor-byte 168
+cargo run --locked -- --headless-screenshot docs/images/simptxt-light.png examples/project/src/main.cpp \
+  --light --vim --folder examples/project --tab examples/welcome.rs --cursor-byte 168
 ```
 
-This runs the actual editor, waits for the sample's loading/highlighting, and captures its GPU-rendered output without an OS window. It still requires a suitable graphics driver. `WGPU_BACKEND` can select `vulkan`, `metal`, or `dx12` where supported.
+A missing startup path leaves a usable untitled editor with a dismissible, nonmodal warning; it never silently creates the missing file. See the [deliberate missing-path test capture](docs/ui-feedback-validation.md#startup-recovery), which is **not the normal startup screen**. Launching without a file argument shows no warning.
+
+This runs the actual editor, waits for the sample's loading/highlighting and lazy folder listings, and captures its GPU-rendered output without an OS window. It still requires a suitable graphics driver. `WGPU_BACKEND` can select `vulkan`, `metal`, or `dx12` where supported.
 
 ## Current boundaries
 

@@ -29,6 +29,311 @@ const MAX_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_CACHED_ENTRIES: usize = 8_192;
 const MAX_EXPANDED_DIRECTORIES: usize = 128;
 const ROW_HEIGHT: f32 = 24.0;
+const DISCLOSURE_WIDTH: f32 = 14.0;
+const ICON_WIDTH: f32 = 24.0;
+const NAME_GAP: f32 = 6.0;
+
+/// Deliberately use ordinary ASCII badges rather than a platform icon font.
+/// Classification affects decoration only: the original path still identifies
+/// every file, including filenames that cannot be represented as UTF-8.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileIconKind {
+    C,
+    Cpp,
+    Header,
+    Rust,
+    Python,
+    Json,
+    Toml,
+    CMake,
+    Generic,
+}
+
+impl FileIconKind {
+    fn for_path(path: &Path) -> Self {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("CMakeLists.txt"))
+        {
+            return Self::CMake;
+        }
+        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+            return Self::Generic;
+        };
+        // Uppercase .C is conventionally C++, unlike lowercase .c.
+        if extension == "C" {
+            return Self::Cpp;
+        }
+        match extension.to_ascii_lowercase().as_str() {
+            "c" => Self::C,
+            "cc" | "cpp" | "cxx" | "c++" => Self::Cpp,
+            "h" | "hh" | "hpp" | "hxx" | "h++" => Self::Header,
+            "rs" => Self::Rust,
+            "py" | "pyi" | "pyw" => Self::Python,
+            "json" | "jsonc" => Self::Json,
+            "toml" => Self::Toml,
+            "cmake" => Self::CMake,
+            _ => Self::Generic,
+        }
+    }
+
+    fn badge(self) -> &'static str {
+        match self {
+            Self::C => "C",
+            Self::Cpp => "C++",
+            Self::Header => "H",
+            Self::Rust => "RS",
+            Self::Python => "PY",
+            Self::Json => "{}",
+            Self::Toml => "TM",
+            Self::CMake => "CM",
+            Self::Generic => "",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::C => "C source",
+            Self::Cpp => "C++ source",
+            Self::Header => "C/C++ header",
+            Self::Rust => "Rust source",
+            Self::Python => "Python source",
+            Self::Json => "JSON file",
+            Self::Toml => "TOML configuration",
+            Self::CMake => "CMake configuration",
+            Self::Generic => "File",
+        }
+    }
+
+    fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
+        let (dark, light) = match self {
+            Self::C | Self::Cpp => ([133, 181, 247], [54, 107, 184]),
+            Self::Header => ([112, 205, 205], [24, 116, 122]),
+            Self::Rust => ([226, 162, 127], [168, 80, 47]),
+            Self::Python => ([230, 199, 103], [143, 106, 18]),
+            Self::Json => ([155, 203, 139], [65, 111, 52]),
+            Self::Toml => ([193, 157, 223], [129, 79, 155]),
+            Self::CMake => ([132, 189, 189], [45, 113, 113]),
+            Self::Generic => return visuals.text_color(),
+        };
+        let [red, green, blue] = if visuals.dark_mode { dark } else { light };
+        egui::Color32::from_rgb(red, green, blue)
+    }
+}
+
+fn row_indent(depth: usize) -> f32 {
+    // Preserve space for the icon and name in a narrow sidebar.
+    (depth as f32 * 14.0).min(112.0)
+}
+
+fn root_label(root: &Path) -> String {
+    root.file_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(root.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn paint_disclosure(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    expanded: bool,
+    color: egui::Color32,
+) {
+    let points = if expanded {
+        [(-4.0, -2.5), (4.0, -2.5), (0.0, 2.5)]
+    } else {
+        [(-2.5, -4.0), (2.5, 0.0), (-2.5, 4.0)]
+    };
+    painter.add(egui::Shape::convex_polygon(
+        points
+            .into_iter()
+            .map(|(x, y)| center + egui::vec2(x, y))
+            .collect(),
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+fn paint_folder(painter: &egui::Painter, rect: egui::Rect, expanded: bool, dark: bool) {
+    let color = if dark {
+        egui::Color32::from_rgb(224, 178, 86)
+    } else {
+        egui::Color32::from_rgb(147, 95, 25)
+    };
+    let origin = rect.center() - egui::vec2(9.0, 8.0);
+    let stroke = egui::Stroke::new(1.25, color);
+    // The tab and body are independent vector rectangles, so the folder never
+    // depends on a missing Unicode glyph or unsupported concave filled path.
+    painter.rect(
+        egui::Rect::from_min_size(origin, egui::vec2(8.0, 6.0)),
+        1.5,
+        color.gamma_multiply(0.22),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.rect(
+        egui::Rect::from_min_size(origin + egui::vec2(0.0, 3.0), egui::vec2(18.0, 13.0)),
+        1.5,
+        color.gamma_multiply(0.22),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    if expanded {
+        // A visibly tilted front flap distinguishes the open folder silhouette.
+        painter.add(egui::Shape::convex_polygon(
+            [(1.0, 7.0), (21.0, 7.0), (17.0, 16.0), (-2.0, 16.0)]
+                .into_iter()
+                .map(|(x, y)| origin + egui::vec2(x, y))
+                .collect(),
+            color.gamma_multiply(0.35),
+            stroke,
+        ));
+    }
+}
+
+fn paint_file(painter: &egui::Painter, rect: egui::Rect, kind: FileIconKind, color: egui::Color32) {
+    let origin = rect.center() - egui::vec2(9.0, 10.0);
+    let stroke = egui::Stroke::new(1.0, color);
+    painter.add(egui::Shape::convex_polygon(
+        [
+            (1.0, 0.0),
+            (11.0, 0.0),
+            (17.0, 6.0),
+            (17.0, 20.0),
+            (1.0, 20.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| origin + egui::vec2(x, y))
+        .collect(),
+        color.gamma_multiply(0.06),
+        stroke,
+    ));
+    painter.line(
+        [(11.0, 0.0), (11.0, 6.0), (17.0, 6.0)]
+            .into_iter()
+            .map(|(x, y)| origin + egui::vec2(x, y))
+            .collect(),
+        stroke,
+    );
+    if kind == FileIconKind::Generic {
+        for y in [10.0, 14.0] {
+            painter.line_segment(
+                [origin + egui::vec2(5.0, y), origin + egui::vec2(13.0, y)],
+                stroke,
+            );
+        }
+    } else {
+        painter.text(
+            origin + egui::vec2(9.0, 13.5),
+            egui::Align2::CENTER_CENTER,
+            kind.badge(),
+            egui::FontId::monospace(if kind == FileIconKind::Cpp { 7.5 } else { 9.0 }),
+            color,
+        );
+    }
+}
+
+fn render_entry_row(
+    ui: &mut egui::Ui,
+    entry: &Entry,
+    expanded: bool,
+    depth: usize,
+) -> egui::Response {
+    let enabled = matches!(entry.kind, EntryKind::Directory | EntryKind::File);
+    let is_folder = entry.kind == EntryKind::Directory;
+    let kind = FileIconKind::for_path(&entry.path);
+    let description = match &entry.kind {
+        EntryKind::Directory if expanded => "Collapse folder",
+        EntryKind::Directory => "Expand folder",
+        EntryKind::File => kind.description(),
+        EntryKind::Link => "Link (not followed)",
+        EntryKind::Other => "Special file (cannot open)",
+        EntryKind::Unavailable(_) => "Unavailable file",
+    };
+    let tooltip = match &entry.kind {
+        EntryKind::Link => format!(
+            "{}\nLinks and reparse points are not followed. Open the intended target explicitly.",
+            entry.path.display()
+        ),
+        EntryKind::Other => format!(
+            "{}\nOnly regular files can be opened.",
+            entry.path.display()
+        ),
+        EntryKind::Unavailable(error) => format!("{}\n{error}", entry.path.display()),
+        _ => format!("{description}\n{}", entry.path.display()),
+    };
+    ui.push_id(&entry.path, |ui| {
+        ui.add_enabled_ui(enabled, |ui| {
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), ROW_HEIGHT),
+                egui::Sense::click(),
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    if is_folder {
+                        egui::WidgetType::CollapsingHeader
+                    } else {
+                        egui::WidgetType::Button
+                    },
+                    ui.is_enabled(),
+                    format!("{description}: {}", entry.display_name),
+                )
+            });
+            if ui.is_rect_visible(rect) {
+                let visuals = ui.style().interact(&response);
+                if response.hovered()
+                    || response.has_focus()
+                    || response.is_pointer_button_down_on()
+                {
+                    ui.painter().rect(
+                        rect,
+                        3.0,
+                        visuals.weak_bg_fill,
+                        visuals.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let left = rect.left() + row_indent(depth);
+                let icon_rect = egui::Rect::from_min_size(
+                    egui::pos2(left + DISCLOSURE_WIDTH, rect.top()),
+                    egui::vec2(ICON_WIDTH, ROW_HEIGHT),
+                );
+                if is_folder {
+                    paint_disclosure(
+                        ui.painter(),
+                        egui::pos2(left + DISCLOSURE_WIDTH / 2.0, rect.center().y),
+                        expanded,
+                        visuals.fg_stroke.color,
+                    );
+                    paint_folder(ui.painter(), icon_rect, expanded, ui.visuals().dark_mode);
+                } else {
+                    paint_file(ui.painter(), icon_rect, kind, kind.color(ui.visuals()));
+                }
+                let text_left = icon_rect.right() + NAME_GAP;
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    entry.display_name.clone(),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    visuals.text_color(),
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(
+                    (rect.right() - text_left - 4.0).max(0.0),
+                );
+                let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+                let text_top = rect.center().y - galley.size().y / 2.0;
+                ui.painter().galley(
+                    egui::pos2(text_left, text_top),
+                    galley,
+                    visuals.text_color(),
+                );
+            }
+            response.on_hover_text(tooltip)
+        })
+        .inner
+    })
+    .inner
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum EntryKind {
@@ -215,6 +520,56 @@ impl ProjectTree {
         self.root.as_deref()
     }
 
+    /// Headless captures must wait for the same lazy listings as the desktop
+    /// UI. A failed listing is settled: its visible error must remain capturable.
+    pub(crate) fn is_settled(&self) -> bool {
+        self.active.is_none()
+            && self.pending_selection.is_none()
+            && self.directories.values().all(|directory| {
+                !matches!(
+                    directory.state,
+                    DirectoryState::Queued | DirectoryState::Loading(_)
+                )
+            })
+    }
+
+    /// Queue only the parents of a known file for deterministic headless
+    /// captures. Listing still happens on the normal bounded worker; this does
+    /// not recursively scan, select the file, or expand any sibling folders.
+    pub(crate) fn reveal_file(&mut self, path: &Path) {
+        let Some(root) = self.root.as_ref() else {
+            return;
+        };
+        let Some(relative_parent) = path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(root).ok())
+        else {
+            return;
+        };
+        if self.cached_entries >= MAX_CACHED_ENTRIES {
+            return;
+        }
+        let mut directory_path = root.clone();
+        let mut missing = Vec::new();
+        for component in relative_parent.components() {
+            let std::path::Component::Normal(name) = component else {
+                // No lexical parent traversal, even if a later component
+                // would happen to return inside the chosen root.
+                return;
+            };
+            directory_path.push(name);
+            if !self.directories.contains_key(&directory_path) {
+                if self.directories.len() + missing.len() >= MAX_EXPANDED_DIRECTORIES {
+                    return;
+                }
+                missing.push(directory_path.clone());
+            }
+        }
+        for parent in missing {
+            self.directories.insert(parent, Directory::queued());
+        }
+    }
+
     /// Replace only the browser's root and cache. Existing editor tabs are not
     /// owned by this component and must be left alone by the caller.
     pub fn set_root(&mut self, root: PathBuf) {
@@ -260,8 +615,12 @@ impl ProjectTree {
                 action = Some(Action::Refresh);
             }
         });
-        ui.label(root.to_string_lossy())
-            .on_hover_text(root.display().to_string());
+        ui.add(
+            egui::Label::new(egui::RichText::new(root_label(&root)).strong())
+                .truncate()
+                .show_tooltip_when_elided(false),
+        )
+        .on_hover_text(root.display().to_string());
         if let Some(error) = &self.worker_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
             return None;
@@ -292,53 +651,24 @@ impl ProjectTree {
             .auto_shrink([false, false])
             .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                 for row in &rows[range] {
-                    ui.horizontal(|ui| {
-                        // Deep trees remain usable in a narrow sidebar.
-                        ui.add_space((row.depth() as f32 * 14.0).min(112.0));
-                        match row {
-                            Row::Entry { entry, expanded, .. } => {
-                                match &entry.kind {
-                                    EntryKind::Directory => {
-                                        let icon = if *expanded { "▾" } else { "▸" };
-                                        let label = format!("{icon} {}", entry.display_name);
-                                        if ui
-                                            .selectable_label(false, label)
-                                            .on_hover_text(entry.path.display().to_string())
-                                            .clicked()
-                                        {
-                                            action = Some(Action::Toggle(entry.path.clone()));
-                                        }
-                                    }
-                                    EntryKind::File => {
-                                        if ui
-                                            .selectable_label(false, &entry.display_name)
-                                            .on_hover_text(entry.path.display().to_string())
-                                            .clicked()
-                                        {
-                                            action = Some(Action::Select(entry.path.clone()));
-                                        }
-                                    }
-                                    EntryKind::Link => {
-                                        ui.add_enabled(
-                                            false,
-                                            egui::Label::new(format!("{} (link)", entry.display_name)),
-                                        )
-                                        .on_hover_text("Links and reparse points are not followed. Open the intended target explicitly.");
-                                    }
-                                    EntryKind::Other => {
-                                        ui.add_enabled(
-                                            false,
-                                            egui::Label::new(format!("{} (special file)", entry.display_name)),
-                                        )
-                                        .on_hover_text("Only regular files can be opened.");
-                                    }
-                                    EntryKind::Unavailable(error) => {
-                                        ui.add_enabled(false, egui::Label::new(&entry.display_name))
-                                            .on_hover_text(error);
-                                    }
-                                }
+                    match row {
+                        Row::Entry { entry, expanded, depth } => {
+                            if render_entry_row(ui, entry, *expanded, *depth).clicked() {
+                                action = match entry.kind {
+                                    EntryKind::Directory => Some(Action::Toggle(entry.path.clone())),
+                                    EntryKind::File => Some(Action::Select(entry.path.clone())),
+                                    _ => None,
+                                };
                             }
-                            Row::Footer { path, directory, .. } => {
+                        }
+                        Row::Footer { path, directory, .. } => {
+                            ui.horizontal(|ui| {
+                                ui.add_space(
+                                    row_indent(row.depth())
+                                        + DISCLOSURE_WIDTH
+                                        + ICON_WIDTH
+                                        + NAME_GAP,
+                                );
                                 match &directory.state {
                                     DirectoryState::Queued | DirectoryState::Loading(_) => {
                                         ui.spinner();
@@ -372,9 +702,9 @@ impl ProjectTree {
                                         }
                                     }
                                 }
-                            }
+                            });
                         }
-                    });
+                    }
                 }
             });
 
@@ -1192,6 +1522,312 @@ mod tests {
     }
 
     #[test]
+    fn source_file_icons_are_deterministic_and_ascii_only() {
+        let cases = [
+            ("main.c", FileIconKind::C),
+            ("main.C", FileIconKind::Cpp),
+            ("buffer_layout.cpp", FileIconKind::Cpp),
+            ("camera.CC", FileIconKind::Cpp),
+            ("main.cxx", FileIconKind::Cpp),
+            ("camera.h", FileIconKind::Header),
+            ("camera.HPP", FileIconKind::Header),
+            ("main.rs", FileIconKind::Rust),
+            ("script.PY", FileIconKind::Python),
+            ("types.pyi", FileIconKind::Python),
+            ("settings.json", FileIconKind::Json),
+            ("settings.JSONC", FileIconKind::Json),
+            ("Cargo.toml", FileIconKind::Toml),
+            ("CMakeLists.txt", FileIconKind::CMake),
+            ("cmakelists.TXT", FileIconKind::CMake),
+            ("FindCamera.cmake", FileIconKind::CMake),
+            ("README.md", FileIconKind::Generic),
+            (".gitignore", FileIconKind::Generic),
+            ("no-extension", FileIconKind::Generic),
+            ("almost.cpp.bak", FileIconKind::Generic),
+        ];
+        for (name, expected) in cases {
+            let kind = FileIconKind::for_path(&PathBuf::from("project").join(name));
+            assert_eq!(kind, expected, "{name}");
+            assert!(kind.badge().is_ascii());
+            assert!(kind.description().is_ascii());
+        }
+    }
+
+    #[test]
+    fn root_label_uses_basename_but_preserves_filesystem_roots() {
+        assert_eq!(
+            root_label(Path::new("/home/example/Documents/workspace/smart_camera")),
+            "smart_camera"
+        );
+        assert_eq!(root_label(Path::new("project")), "project");
+        #[cfg(unix)]
+        assert_eq!(root_label(Path::new("/")), "/");
+        #[cfg(windows)]
+        assert_eq!(root_label(Path::new("C:\\")), "C:\\");
+    }
+
+    #[test]
+    fn capture_reveal_queues_only_parent_folders_inside_root() {
+        let mut tree = ProjectTree::new();
+        let root = PathBuf::from("/project");
+        tree.reveal_file(&root.join("no-root/file.rs"));
+        assert!(tree.directories.is_empty());
+        tree.set_root(root.clone());
+        tree.reveal_file(&root.join("src/camera/file.cpp"));
+        assert_eq!(tree.directories.len(), 3);
+        for parent in [root.clone(), root.join("src"), root.join("src/camera")] {
+            assert!(matches!(
+                tree.directories[&parent].state,
+                DirectoryState::Queued
+            ));
+            assert!(tree.directories[&parent].entries.is_empty());
+        }
+        tree.reveal_file(&root.join("src/camera/file.cpp"));
+        tree.reveal_file(&root.join("root-file.cpp"));
+        tree.reveal_file(Path::new("/outside/src/file.rs"));
+        tree.reveal_file(&root.join("../outside/file.rs"));
+        tree.reveal_file(&root.join("src/../../outside/file.rs"));
+        assert_eq!(tree.directories.len(), 3);
+        assert_eq!(tree.cached_entries, 0);
+        assert!(tree.pending_selection.is_none());
+    }
+
+    #[test]
+    fn capture_readiness_waits_for_all_work_but_not_failed_listings() {
+        let mut tree = ProjectTree::new();
+        assert!(tree.is_settled());
+        let root = PathBuf::from("/project");
+        tree.set_root(root.clone());
+        assert!(!tree.is_settled());
+        tree.directories.get_mut(&root).unwrap().state = DirectoryState::Loading(1);
+        assert!(!tree.is_settled());
+        tree.directories.get_mut(&root).unwrap().state =
+            DirectoryState::Failed("Permission denied".into());
+        assert!(tree.is_settled());
+        tree.directories.get_mut(&root).unwrap().state = DirectoryState::Ready;
+        assert!(tree.is_settled());
+        tree.perform(Action::Select(root.join("file.rs")));
+        assert!(!tree.is_settled());
+        tree.pending_selection = None;
+        active(&mut tree, &root.join("file.rs"), 2);
+        assert!(!tree.is_settled());
+        tree.active = None;
+        assert!(tree.is_settled());
+        tree.reveal_file(&root.join("src/camera/file.cpp"));
+        assert!(!tree.is_settled());
+    }
+
+    #[test]
+    fn capture_reveal_obeys_cache_and_expansion_bounds_without_partial_changes() {
+        let mut tree = ProjectTree::new();
+        let root = PathBuf::from("/project");
+        tree.set_root(root.clone());
+        tree.cached_entries = MAX_CACHED_ENTRIES;
+        tree.reveal_file(&root.join("src/file.rs"));
+        assert_eq!(tree.directories.len(), 1);
+        tree.cached_entries = 0;
+        let mut deep_file = root.clone();
+        for index in 0..MAX_EXPANDED_DIRECTORIES {
+            deep_file.push(format!("nested-{index}"));
+        }
+        deep_file.push("file.rs");
+        tree.reveal_file(&deep_file);
+        assert_eq!(tree.directories.len(), 1);
+        for index in 0..MAX_EXPANDED_DIRECTORIES - 2 {
+            tree.directories
+                .insert(root.join(format!("dir-{index}")), Directory::queued());
+        }
+        tree.reveal_file(&root.join("src/deeper/file.rs"));
+        assert_eq!(tree.directories.len(), MAX_EXPANDED_DIRECTORIES - 1);
+        tree.reveal_file(&root.join("src/file.rs"));
+        assert_eq!(tree.directories.len(), MAX_EXPANDED_DIRECTORIES);
+    }
+
+    fn directory_entry(path: PathBuf) -> Entry {
+        Entry {
+            kind: EntryKind::Directory,
+            ..entry(path)
+        }
+    }
+
+    fn ready_directory(entries: Vec<Entry>) -> Directory {
+        Directory {
+            entries,
+            has_more: false,
+            desired_limit: PAGE_ENTRIES,
+            state: DirectoryState::Ready,
+        }
+    }
+
+    fn flatten_shapes<'a>(shape: &'a egui::Shape, shapes: &mut Vec<&'a egui::Shape>) {
+        if let egui::Shape::Vec(children) = shape {
+            for child in children {
+                flatten_shapes(child, shapes);
+            }
+        } else {
+            shapes.push(shape);
+        }
+    }
+
+    fn rendered_shapes(
+        tree: &mut ProjectTree,
+        context: &egui::Context,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(260.0, 620.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                assert!(tree.render(ui).is_none());
+            },
+        );
+        let shapes = output.shapes.clone();
+        output.drop_without_applying_deltas();
+        shapes
+    }
+
+    #[test]
+    fn nested_folders_render_vector_disclosures_and_source_badges_in_both_themes() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            let root = PathBuf::from("/long/home/path/project");
+            let src = root.join("src");
+            let nested = src.join("nested");
+            let mut tree = ProjectTree::new();
+            tree.set_root(root.clone());
+            tree.directories.insert(
+                root.clone(),
+                ready_directory(vec![
+                    directory_entry(src.clone()),
+                    directory_entry(root.join("docs")),
+                    entry(root.join("main.c")),
+                    entry(root.join("camera.cpp")),
+                    entry(root.join("camera.h")),
+                    entry(root.join("script.py")),
+                    entry(root.join("settings.json")),
+                    entry(root.join("Cargo.toml")),
+                    entry(root.join("CMakeLists.txt")),
+                    entry(root.join("README.md")),
+                ]),
+            );
+            tree.directories.insert(
+                src.clone(),
+                ready_directory(vec![
+                    directory_entry(nested.clone()),
+                    entry(src.join("main.rs")),
+                ]),
+            );
+            tree.cached_entries = 12;
+            let context = egui::Context::default();
+            context.set_visuals(visuals);
+            // Warm up layout so the test inspects the same settled rendering as
+            // the desktop sidebar rather than egui's sizing/discard pass.
+            rendered_shapes(&mut tree, &context);
+            let output = rendered_shapes(&mut tree, &context);
+            let mut shapes = Vec::new();
+            for clipped in &output {
+                flatten_shapes(&clipped.shape, &mut shapes);
+            }
+            let text: Vec<_> = shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect();
+            // In particular, disclosure markers are not text glyphs. All
+            // labels in this ASCII fixture must render without icon fonts.
+            assert!(text.iter().all(|text| text.galley.text().is_ascii()));
+            for label in [
+                "project", "src", "nested", "docs", "C", "C++", "H", "RS", "PY", "{}", "TM", "CM",
+            ] {
+                assert!(
+                    text.iter().any(|text| text.galley.text() == label),
+                    "missing label or badge {label}"
+                );
+            }
+            assert!(
+                !text
+                    .iter()
+                    .any(|text| text.galley.text().contains("/long/home"))
+            );
+            let triangles: Vec<_> = shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Path(path) if path.closed && path.points.len() == 3 => Some(path),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(triangles.len(), 3, "one painted triangle per folder");
+            assert_eq!(triangles[0].points[0].y, triangles[0].points[1].y);
+            assert!(triangles[0].points[2].y > triangles[0].points[0].y);
+            assert_eq!(triangles[1].points[0].x, triangles[1].points[2].x);
+            assert!(triangles[1].points[1].x > triangles[1].points[0].x);
+            // The expanded folder has its own vector front flap.
+            assert_eq!(
+                shapes
+                    .iter()
+                    .filter(|shape| matches!(
+                        shape, egui::Shape::Path(path) if path.closed && path.points.len() == 4
+                    ))
+                    .count(),
+                1
+            );
+            let text_x = |label| {
+                text.iter()
+                    .find(|text| text.galley.text() == label)
+                    .unwrap()
+                    .pos
+                    .x
+            };
+            assert_eq!(text_x("src"), text_x("camera.cpp"));
+            assert_eq!(text_x("nested"), text_x("main.rs"));
+            assert_eq!(text_x("nested") - text_x("src"), 14.0);
+
+            // Expand the nested folder without any filesystem reads, then
+            // verify its child and open flap appear in the real row renderer.
+            tree.perform(Action::Toggle(nested.clone()));
+            tree.directories.insert(
+                nested.clone(),
+                ready_directory(vec![entry(nested.join("deep.rs"))]),
+            );
+            tree.cached_entries += 1;
+            let output = rendered_shapes(&mut tree, &context);
+            let mut shapes = Vec::new();
+            for clipped in &output {
+                flatten_shapes(&clipped.shape, &mut shapes);
+            }
+            assert!(shapes.iter().any(|shape| matches!(
+                shape, egui::Shape::Text(text) if text.galley.text() == "deep.rs"
+            )));
+            assert_eq!(
+                shapes
+                    .iter()
+                    .filter(|shape| matches!(
+                        shape, egui::Shape::Path(path) if path.closed && path.points.len() == 4
+                    ))
+                    .count(),
+                2
+            );
+            tree.perform(Action::Toggle(src));
+            let output = rendered_shapes(&mut tree, &context);
+            let mut shapes = Vec::new();
+            for clipped in &output {
+                flatten_shapes(&clipped.shape, &mut shapes);
+            }
+            assert!(!shapes.iter().any(|shape| matches!(
+                shape, egui::Shape::Text(text) if matches!(text.galley.text(), "nested" | "deep.rs" | "main.rs")
+            )));
+            assert!(!shapes.iter().any(|shape| matches!(
+                shape, egui::Shape::Path(path) if path.closed && path.points.len() == 4
+            )));
+        }
+    }
+
+    #[test]
     fn full_cache_renders_only_a_viewport_of_rows_in_both_themes() {
         let mut tree = ProjectTree::new();
         let root = PathBuf::from("/project");
@@ -1235,8 +1871,9 @@ mod tests {
                     assert!(tree.render(ui).is_none());
                 },
             );
-            // A non-virtualized tree would paint thousands of labels.
-            assert!(output.shapes.len() < 150, "painted {}", output.shapes.len());
+            // Each visible row paints several small vector shapes. A
+            // non-virtualized tree would paint tens of thousands, not <200.
+            assert!(output.shapes.len() < 200, "painted {}", output.shapes.len());
             output.drop_without_applying_deltas();
         }
     }

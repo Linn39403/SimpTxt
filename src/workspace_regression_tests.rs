@@ -56,7 +56,11 @@ fn key(key: Key, command: bool) -> egui::Event {
     }
 }
 
-fn render_frame(ctx: &egui::Context, app: &mut WorkspaceApp, events: Vec<egui::Event>) {
+fn render_frame(
+    ctx: &egui::Context,
+    app: &mut WorkspaceApp,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
     let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 760.0))),
@@ -66,6 +70,28 @@ fn render_frame(ctx: &egui::Context, app: &mut WorkspaceApp, events: Vec<egui::E
         |ui| app.render(ui),
     );
     output.textures_delta.clear();
+    output
+}
+
+fn painted_text(output: &egui::FullOutput) -> Vec<(String, Rect)> {
+    fn collect(shape: &egui::Shape, text: &mut Vec<(String, Rect)>) {
+        match shape {
+            egui::Shape::Text(shape) => {
+                text.push((shape.galley.text().to_owned(), shape.visual_bounding_rect()));
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, text);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut text = Vec::new();
+    for shape in &output.shapes {
+        collect(&shape.shape, &mut text);
+    }
+    text
 }
 
 fn cancel_pending(app: &mut WorkspaceApp, id: TabId, ctx: &egui::Context) {
@@ -1502,4 +1528,358 @@ fn folder_change_discards_queued_old_root_sidebar_selection() {
     assert!(app.deferred_project_path.is_none());
     assert_eq!(bytes(&mut app, first), b"keep owner");
     assert!(editor(&mut app, first).path.is_none());
+}
+
+#[test]
+fn missing_initial_cli_path_renders_editable_untitled_with_nonmodal_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing-startup.txt");
+    let ctx = egui::Context::default();
+    let mut app = WorkspaceApp::from_startup_path(&ctx, Some(missing.clone()), false);
+    let first = app.active;
+    assert_eq!(app.tabs.len(), 1);
+    assert!(editor(&mut app, first).ready);
+    assert!(editor(&mut app, first).doc.is_empty());
+    assert!(!editor(&mut app, first).doc.is_modified());
+    assert!(editor(&mut app, first).path.is_none());
+    assert!(editor(&mut app, first).stamp.is_none());
+    assert!(editor(&mut app, first).work.is_none());
+    assert!(editor(&mut app, first).error.is_none());
+    assert!(editor(&mut app, first).pending.is_none());
+    assert_eq!(editor(&mut app, first).cursor, 0);
+    assert!(
+        !app.modal_open(),
+        "a startup warning must not block editing"
+    );
+    let warning = app
+        .startup_warning
+        .clone()
+        .expect("visible startup warning");
+    assert!(warning.contains("missing-startup.txt"));
+
+    // Use the actual workspace render, rather than only inspecting model state.
+    // The warning, Untitled tabs/toolbar, and editor gutter must all be painted.
+    let output = render_frame(&ctx, &mut app, Vec::new());
+    let text = painted_text(&output);
+    assert!(text.iter().any(|(text, _)| text == &warning));
+    for expected in [
+        "Could not open the startup file",
+        "Untitled",
+        "New",
+        "Open…",
+        "1",
+        "Ln 1 · byte 1",
+    ] {
+        assert!(
+            text.iter().any(|(text, _)| text == expected),
+            "missing editor UI text {expected:?}"
+        );
+    }
+    assert!(editor(&mut app, first).rendered_rows > 0);
+    assert!(output.viewport_output.values().any(|viewport| {
+        viewport.commands.iter().any(|command| {
+            matches!(command, egui::ViewportCommand::Title(title) if title == "Untitled — SimpTxt")
+        })
+    }));
+
+    let output = render_frame(
+        &ctx,
+        &mut app,
+        vec![egui::Event::Text("usable editor".into())],
+    );
+    assert_eq!(bytes(&mut app, first), b"usable editor");
+    assert!(editor(&mut app, first).doc.is_modified());
+    assert!(
+        painted_text(&output)
+            .iter()
+            .any(|(text, _)| text == "usable editor")
+    );
+    assert!(!app.modal_open());
+    assert!(editor(&mut app, first).path.is_none());
+    assert!(
+        !missing.exists(),
+        "startup recovery must not create the file"
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn missing_initial_path_keeps_new_and_valid_open_usable_without_dismissing_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("never-created.txt");
+    let valid = directory.path().join("valid.txt");
+    std::fs::write(&valid, "valid α\r\n").unwrap();
+    let ctx = egui::Context::default();
+    let mut app = WorkspaceApp::from_startup_path(&ctx, Some(missing.clone()), false);
+    let recovered = app.active;
+    render_frame(
+        &ctx,
+        &mut app,
+        vec![egui::Event::Text("keep these new edits".into())],
+    );
+    let output = render_frame(&ctx, &mut app, Vec::new());
+    let new_button = painted_text(&output)
+        .into_iter()
+        .find(|(text, _)| text == "New")
+        .expect("New button is visibly rendered")
+        .1
+        .center();
+    for pressed in [true, false] {
+        render_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(new_button),
+                egui::Event::PointerButton {
+                    pos: new_button,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    let new = app.active;
+    assert_ne!(
+        new, recovered,
+        "the actual New toolbar button remains usable"
+    );
+    assert_eq!(app.tabs.len(), 2);
+    assert!(editor(&mut app, new).ready);
+    assert!(editor(&mut app, new).doc.is_empty());
+    assert!(editor(&mut app, new).path.is_none());
+    assert_eq!(bytes(&mut app, recovered), b"keep these new edits");
+    assert!(!app.modal_open());
+    assert!(app.startup_warning.is_some());
+    render_frame(
+        &ctx,
+        &mut app,
+        vec![egui::Event::Text("new tab also editable".into())],
+    );
+    assert_eq!(bytes(&mut app, new), b"new tab also editable");
+
+    // Complete the same per-tab channel used by the native Open dialog without
+    // spawning platform UI in the test process.
+    editor(&mut app, new).dialog_pending = true;
+    editor(&mut app, new)
+        .tx
+        .send(Message::OpenDialog(Some(valid.clone())))
+        .unwrap();
+    await_loads(&mut app, &ctx);
+    let opened = app.active;
+    assert_eq!(app.tabs.len(), 3);
+    assert_eq!(bytes(&mut app, opened), "valid α\r\n".as_bytes());
+    assert_eq!(editor(&mut app, opened).path.as_ref(), Some(&valid));
+    assert!(editor(&mut app, opened).ready);
+    assert!(!editor(&mut app, opened).doc.is_modified());
+    assert_eq!(bytes(&mut app, recovered), b"keep these new edits");
+    assert!(editor(&mut app, recovered).doc.is_modified());
+    assert_eq!(bytes(&mut app, new), b"new tab also editable");
+    assert!(editor(&mut app, new).doc.is_modified());
+    assert!(!app.modal_open());
+    assert!(app.startup_warning.is_some());
+    assert!(!missing.exists());
+    assert_eq!(std::fs::read(&valid).unwrap(), "valid α\r\n".as_bytes());
+}
+
+#[test]
+fn valid_initial_cli_path_loads_without_blank_recovery_or_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("valid-startup.txt");
+    let original = "\u{feff}valid startup α\r\n";
+    std::fs::write(&path, original).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = WorkspaceApp::from_startup_path(&ctx, Some(path.clone()), false);
+    let first = app.active;
+    assert_eq!(app.startup_load, Some((first, 1)));
+    await_loads(&mut app, &ctx);
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.active, first);
+    assert!(app.startup_load.is_none());
+    assert!(app.startup_warning.is_none());
+    assert!(editor(&mut app, first).ready);
+    assert!(editor(&mut app, first).error.is_none());
+    assert_eq!(editor(&mut app, first).path.as_ref(), Some(&path));
+    assert!(editor(&mut app, first).stamp.is_some());
+    assert_eq!(bytes(&mut app, first), original.as_bytes());
+    assert!(!editor(&mut app, first).doc.is_modified());
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn missing_normal_open_preserves_dirty_document_revision_undo_path_cursor_and_tabs() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let original_path = directory.path().join("original.txt");
+    let missing = directory.path().join("missing-normal-open.txt");
+    std::fs::write(&original_path, "original α\nsecond line").unwrap();
+    app.open_path(original_path.clone(), &ctx);
+    await_loads(&mut app, &ctx);
+    let first = app.active;
+    editor(&mut app, first).cursor = 8;
+    editor(&mut app, first).insert("dirty ");
+    editor(&mut app, first).anchor = Some(2);
+    editor(&mut app, first).top_line = 1;
+    editor(&mut app, first).horizontal = 3;
+    let second = app.new_tab(&ctx);
+    editor(&mut app, second).insert("independent dirty tab");
+    app.switch_to(first);
+    let original = bytes(&mut app, first);
+    let revision = editor(&mut app, first).doc.revision();
+    let cursor = editor(&mut app, first).cursor;
+    let anchor = editor(&mut app, first).anchor;
+    let generation = editor(&mut app, first).generation;
+    let tab_ids: Vec<_> = app.tabs.iter().map(|tab| tab.id).collect();
+    app.open_path(missing.clone(), &ctx);
+    assert_eq!(app.active, first);
+    assert_eq!(
+        app.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+        tab_ids
+    );
+    assert_eq!(bytes(&mut app, first), original);
+    assert_eq!(editor(&mut app, first).doc.revision(), revision);
+    assert_eq!(editor(&mut app, first).generation, generation);
+    assert_eq!(editor(&mut app, first).cursor, cursor);
+    assert_eq!(editor(&mut app, first).anchor, anchor);
+    assert_eq!(editor(&mut app, first).top_line, 1);
+    assert_eq!(editor(&mut app, first).horizontal, 3);
+    assert_eq!(editor(&mut app, first).path.as_ref(), Some(&original_path));
+    assert!(editor(&mut app, first).stamp.is_some());
+    assert!(editor(&mut app, first).ready);
+    assert!(editor(&mut app, first).work.is_none());
+    assert!(editor(&mut app, first).doc.is_modified());
+    assert!(editor(&mut app, first).error.is_some());
+    assert!(app.startup_warning.is_none());
+    assert_eq!(bytes(&mut app, second), b"independent dirty tab");
+    assert!(editor(&mut app, second).doc.is_modified());
+    editor(&mut app, first).undo(false);
+    assert_eq!(bytes(&mut app, first), "original α\nsecond line".as_bytes());
+    assert!(!editor(&mut app, first).doc.is_modified());
+    editor(&mut app, first).undo(true);
+    assert_eq!(bytes(&mut app, first), original);
+    assert_eq!(editor(&mut app, first).doc.revision(), revision);
+    assert!(editor(&mut app, first).doc.is_modified());
+    assert!(!missing.exists());
+    assert_eq!(
+        std::fs::read(original_path).unwrap(),
+        "original α\nsecond line".as_bytes()
+    );
+}
+
+#[test]
+fn asynchronous_initial_open_failure_recovers_only_its_inactive_startup_tab() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let failed_path = directory.path().join("disappeared-after-startup.txt");
+    let first = app.active;
+    seed(&mut app, first, "incomplete preview");
+    let startup = editor(&mut app, first);
+    startup.generation = 7;
+    startup.ready = false;
+    startup.path = Some(failed_path.clone());
+    startup.work = Some(work("Opening"));
+    let late_sender = startup.tx.clone();
+    app.startup_load = Some((first, 7));
+    let second = app.new_tab(&ctx);
+    editor(&mut app, second).insert("other tab edits");
+    editor(&mut app, second).cursor = 4;
+    let revision = editor(&mut app, second).doc.revision();
+    late_sender
+        .send(Message::Loaded(
+            7,
+            Err("file disappeared while opening".into()),
+        ))
+        .unwrap();
+    app.poll(&ctx);
+    assert_eq!(app.active, second);
+    assert_eq!(app.tabs.len(), 2);
+    assert!(app.startup_load.is_none());
+    let warning = app.startup_warning.as_ref().expect("startup error warning");
+    assert!(warning.contains("disappeared-after-startup.txt"));
+    assert!(warning.contains("file disappeared while opening"));
+    assert!(editor(&mut app, first).ready);
+    assert!(editor(&mut app, first).doc.is_empty());
+    assert!(!editor(&mut app, first).doc.is_modified());
+    assert!(editor(&mut app, first).path.is_none());
+    assert!(editor(&mut app, first).stamp.is_none());
+    assert!(editor(&mut app, first).work.is_none());
+    assert!(editor(&mut app, first).error.is_none());
+    assert_eq!(bytes(&mut app, second), b"other tab edits");
+    assert_eq!(editor(&mut app, second).doc.revision(), revision);
+    assert_eq!(editor(&mut app, second).cursor, 4);
+    assert!(!app.modal_open());
+    assert!(
+        late_sender
+            .send(Message::Loaded(7, Err("stale duplicate failure".into())))
+            .is_err(),
+        "the discarded startup preview must not retain a live result channel"
+    );
+    editor(&mut app, second).undo(false);
+    assert!(editor(&mut app, second).doc.is_empty());
+    assert!(!failed_path.exists());
+}
+
+#[test]
+fn stale_startup_failure_cannot_replace_a_new_document_generation() {
+    let (ctx, mut app) = setup();
+    let first = app.active;
+    app.startup_load = Some((first, 2));
+    editor(&mut app, first).generation = 3;
+    editor(&mut app, first).insert("new generation edits");
+    let revision = editor(&mut app, first).doc.revision();
+    editor(&mut app, first)
+        .tx
+        .send(Message::Loaded(2, Err("outdated startup failure".into())))
+        .unwrap();
+    app.poll(&ctx);
+    assert_eq!(app.active, first);
+    assert_eq!(app.tabs.len(), 1);
+    assert!(app.startup_load.is_none());
+    assert!(app.startup_warning.is_none());
+    assert_eq!(bytes(&mut app, first), b"new generation edits");
+    assert_eq!(editor(&mut app, first).doc.revision(), revision);
+    assert!(editor(&mut app, first).ready);
+    assert!(editor(&mut app, first).error.is_none());
+    editor(&mut app, first).undo(false);
+    assert!(editor(&mut app, first).doc.is_empty());
+}
+
+#[test]
+fn normal_asynchronous_open_failure_does_not_apply_startup_blank_recovery() {
+    let (ctx, mut app) = setup();
+    let first = app.active;
+    editor(&mut app, first).insert("existing dirty document");
+    let revision = editor(&mut app, first).doc.revision();
+    let opened = app.new_tab(&ctx);
+    seed(&mut app, opened, "read-only preview");
+    let path = PathBuf::from("failed-normal-open.txt");
+    let loading = editor(&mut app, opened);
+    loading.ready = false;
+    loading.path = Some(path.clone());
+    loading.work = Some(work("Opening"));
+    loading
+        .tx
+        .send(Message::Loaded(
+            loading.generation,
+            Err("normal open did not complete".into()),
+        ))
+        .unwrap();
+    app.poll(&ctx);
+    assert_eq!(app.active, opened);
+    assert_eq!(app.tabs.len(), 2);
+    assert!(app.startup_warning.is_none());
+    assert!(app.startup_load.is_none());
+    assert_eq!(bytes(&mut app, first), b"existing dirty document");
+    assert_eq!(editor(&mut app, first).doc.revision(), revision);
+    assert!(editor(&mut app, first).doc.is_modified());
+    assert_eq!(bytes(&mut app, opened), b"read-only preview");
+    assert_eq!(editor(&mut app, opened).path.as_ref(), Some(&path));
+    assert!(!editor(&mut app, opened).ready);
+    assert!(editor(&mut app, opened).work.is_none());
+    assert_eq!(
+        editor(&mut app, opened).error.as_deref(),
+        Some("normal open did not complete")
+    );
+    editor(&mut app, first).undo(false);
+    assert!(editor(&mut app, first).doc.is_empty());
 }

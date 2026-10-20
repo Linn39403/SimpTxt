@@ -14,7 +14,7 @@ fn main() -> eframe::Result {
         if args.len() < 3 {
             eprintln!(
                 "Usage: simptxt --headless-screenshot|--headless-benchmark output.png input-file \
-                 [--light] [--vim] [--folder directory] [--tab file] [--cursor-byte offset]"
+                 [--light] [--vim] [--folder directory] [--tab file] [--cursor-byte offset] [--startup-warning]"
             );
             std::process::exit(2);
         }
@@ -25,6 +25,8 @@ fn main() -> eframe::Result {
                 options.theme = preferences::Theme::Light;
             } else if argument == "--vim" {
                 options.vim = true;
+            } else if argument == "--startup-warning" {
+                options.startup_warning = true;
             } else if argument == "--cursor-byte" {
                 options.cursor_byte = extra
                     .next()
