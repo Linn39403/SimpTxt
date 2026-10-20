@@ -1,4 +1,12 @@
-use crate::view;
+use crate::{preferences::EditorPreferences, view};
+
+#[path = "workspace.rs"]
+mod workspace;
+use workspace::WorkspaceAction;
+pub use workspace::WorkspaceApp;
+
+#[path = "app_vim.rs"]
+mod app_vim;
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Sense, Vec2};
 use simptxt::{
     document::Document,
@@ -17,13 +25,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const FONT_SIZE: f32 = 15.0;
-const ROW_HEIGHT: f32 = 23.0;
-const TEXT: Color32 = Color32::from_rgb(209, 216, 226);
-const MUTED: Color32 = Color32::from_rgb(118, 132, 152);
-const BG: Color32 = Color32::from_rgb(20, 25, 33);
-const ACCENT: Color32 = Color32::from_rgb(106, 207, 188);
-
 enum Message {
     OpenDialog(Option<PathBuf>),
     SaveDialog(Option<PathBuf>),
@@ -39,6 +40,8 @@ enum Pending {
     Open,
     Reload,
     Exit,
+    CloseTab,
+    QuitWorkspace,
 }
 struct Work {
     label: &'static str,
@@ -53,6 +56,14 @@ struct SearchWork {
 }
 
 pub struct EditorApp {
+    preferences: EditorPreferences,
+    vim_enabled: bool,
+    vim: simptxt::vim::VimState,
+    vim_register: simptxt::vim::Register,
+    bracket_cache: simptxt::brackets::BracketCache,
+    workspace_managed: bool,
+    workspace_actions: Vec<WorkspaceAction>,
+    save_destination: Option<PathBuf>,
     doc: Document,
     path: Option<PathBuf>,
     stamp: Option<FileStamp>,
@@ -100,22 +111,18 @@ pub struct EditorApp {
 }
 
 impl EditorApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, smoke: bool) -> Self {
-        let mut app = Self::create(&cc.egui_ctx, smoke);
-        if !smoke && let Some(path) = path {
-            app.open_path(path, &cc.egui_ctx);
-        }
-        app
-    }
     fn create(ctx: &egui::Context, smoke: bool) -> Self {
-        ctx.set_visuals(egui::Visuals::dark());
-        ctx.style_mut_of(egui::Theme::Dark, |s| {
-            s.visuals.panel_fill = BG;
-            s.visuals.window_fill = Color32::from_rgb(29, 35, 45);
-            s.spacing.item_spacing = Vec2::new(10.0, 8.0);
-        });
+        EditorPreferences::default().apply_theme(ctx);
         let (tx, rx) = mpsc::channel();
         let mut app = Self {
+            preferences: EditorPreferences::default(),
+            vim_enabled: false,
+            vim: simptxt::vim::VimState::default(),
+            vim_register: simptxt::vim::Register::default(),
+            bracket_cache: simptxt::brackets::BracketCache::default(),
+            workspace_managed: false,
+            workspace_actions: Vec::new(),
+            save_destination: None,
             doc: Document::new(),
             path: None,
             stamp: None,
@@ -171,6 +178,13 @@ impl EditorApp {
     }
 
     fn selection(&self) -> Range<usize> {
+        if self.vim_enabled && self.vim.mode() == simptxt::vim::Mode::Visual {
+            return simptxt::vim::visual_selection_range(
+                &self.doc,
+                self.anchor.unwrap_or(self.cursor),
+                self.cursor,
+            );
+        }
         match self.anchor {
             Some(a) => a.min(self.cursor)..a.max(self.cursor),
             None => self.cursor..self.cursor,
@@ -190,6 +204,13 @@ impl EditorApp {
         }
         self.highlight = None;
         self.highlight_revision = None;
+    }
+    fn pause_highlight(&mut self) {
+        if let Some(cancel) = self.highlight_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+            self.highlight_id += 1;
+            self.highlight_revision = None;
+        }
     }
     fn changed(&mut self) {
         self.cancel_highlight();
@@ -330,11 +351,39 @@ impl EditorApp {
         }
     }
     fn request(&mut self, pending: Pending, ctx: &egui::Context) {
+        if self.workspace_managed
+            && matches!(pending, Pending::Reload)
+            && matches!(
+                self.pending,
+                Some(Pending::CloseTab | Pending::QuitWorkspace)
+            )
+        {
+            // Reload is a new destructive decision, not approval of a pending
+            // close/quit. Abort that continuation before replacing its prompt.
+            self.workspace_actions.push(WorkspaceAction::CancelClose);
+            self.pending = None;
+            self.continue_after_save = false;
+        }
+        if self.workspace_managed {
+            let action = match pending {
+                Pending::New => Some(WorkspaceAction::New),
+                Pending::Open => Some(WorkspaceAction::OpenDialog),
+                Pending::Exit => Some(WorkspaceAction::Quit),
+                Pending::CloseTab => Some(WorkspaceAction::Close),
+                _ => None,
+            };
+            if let Some(action) = action {
+                self.workspace_actions.push(action);
+                self.cancel_vim_input();
+                return;
+            }
+        }
         if self.work.is_some() || self.dialog_pending {
             self.status = "Finish or cancel the current file operation first".into();
             return;
         }
         self.cancel_search();
+        self.cancel_vim_input();
         if self.doc.is_modified() && self.ready {
             self.pending = Some(pending);
         } else {
@@ -369,9 +418,16 @@ impl EditorApp {
             }
             Pending::Reload => {
                 if let Some(path) = self.path.clone() {
-                    self.open_path(path, ctx);
+                    if self.workspace_managed {
+                        self.workspace_actions
+                            .push(WorkspaceAction::ReloadPath(path));
+                    } else {
+                        self.open_path(path, ctx);
+                    }
                 }
             }
+            Pending::CloseTab => self.workspace_actions.push(WorkspaceAction::CloseApproved),
+            Pending::QuitWorkspace => self.workspace_actions.push(WorkspaceAction::QuitApproved),
             Pending::Exit => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -416,6 +472,13 @@ impl EditorApp {
         });
     }
     fn save_as(&mut self, ctx: &egui::Context) {
+        if self.workspace_managed {
+            self.workspace_actions.push(WorkspaceAction::SaveAs);
+            return;
+        }
+        self.save_as_internal(ctx);
+    }
+    fn save_as_internal(&mut self, ctx: &egui::Context) {
         if !self.ready || self.work.is_some() || self.dialog_pending {
             return;
         }
@@ -434,7 +497,21 @@ impl EditorApp {
             ctx.request_repaint();
         });
     }
+    fn accept_save_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if path.exists() {
+            self.overwrite = Some(path);
+        } else {
+            self.start_save(path, None, ctx);
+        }
+    }
     fn save(&mut self, ctx: &egui::Context) {
+        if self.workspace_managed {
+            self.workspace_actions.push(WorkspaceAction::Save);
+            return;
+        }
+        self.save_internal(ctx);
+    }
+    fn save_internal(&mut self, ctx: &egui::Context) {
         if !self.ready || self.work.is_some() {
             return;
         }
@@ -447,7 +524,7 @@ impl EditorApp {
             }
             self.start_save(path, self.stamp.clone(), ctx);
         } else {
-            self.save_as(ctx);
+            self.save_as_internal(ctx);
         }
     }
     fn start_save(&mut self, path: PathBuf, expected: Option<FileStamp>, ctx: &egui::Context) {
@@ -459,6 +536,7 @@ impl EditorApp {
         let generation = self.generation;
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
+        self.save_destination = Some(path.clone());
         self.work = Some(Work {
             label: "Saving",
             cancel: cancel.clone(),
@@ -552,16 +630,20 @@ impl EditorApp {
                 Message::OpenDialog(path) => {
                     self.dialog_pending = false;
                     if let Some(p) = path {
-                        self.open_path(p, ctx);
+                        if self.workspace_managed {
+                            self.workspace_actions.push(WorkspaceAction::OpenPath(p));
+                        } else {
+                            self.open_path(p, ctx);
+                        }
                     }
                 }
                 Message::SaveDialog(path) => {
                     self.dialog_pending = false;
                     if let Some(p) = path {
-                        if p.exists() {
-                            self.overwrite = Some(p);
+                        if self.workspace_managed {
+                            self.workspace_actions.push(WorkspaceAction::SavePath(p));
                         } else {
-                            self.start_save(p, None, ctx);
+                            self.accept_save_path(p, ctx);
                         }
                     } else {
                         self.continue_after_save = false;
@@ -587,6 +669,7 @@ impl EditorApp {
                 }
                 Message::Saved(g, rev, path, result) if g == self.generation => {
                     self.work = None;
+                    self.save_destination = None;
                     match result {
                         Ok(stamp) => {
                             self.doc.mark_saved_revision(rev);
@@ -728,7 +811,14 @@ impl EditorApp {
         }
     }
     fn event(&mut self, event: egui::Event, ctx: &egui::Context) {
+        if matches!(event, egui::Event::WindowFocused(false)) {
+            self.cancel_vim_input();
+            return;
+        }
         if !self.editor_focus || self.modal_open() {
+            return;
+        }
+        if self.vim_enabled && self.vim_event(&event, ctx) {
             return;
         }
         match event {
@@ -911,11 +1001,13 @@ impl EditorApp {
             }
         }
         if f {
+            self.cancel_vim_input();
             self.find_open = true;
             self.find_focus = true;
             self.editor_focus = false;
         }
         if g {
+            self.cancel_vim_input();
             self.goto_open = true;
             self.editor_focus = false;
         }
@@ -933,7 +1025,7 @@ impl EditorApp {
                 ui.label(
                     egui::RichText::new("SimpTxt")
                         .strong()
-                        .color(ACCENT)
+                        .color(self.preferences.palette().accent)
                         .size(18.0),
                 );
                 ui.separator();
@@ -960,6 +1052,7 @@ impl EditorApp {
                 }
                 ui.separator();
                 if ui.button("Find").clicked() {
+                    self.cancel_vim_input();
                     self.find_open = !self.find_open;
                     self.find_focus = self.find_open;
                     self.editor_focus = !self.find_open;
@@ -1003,7 +1096,7 @@ impl EditorApp {
                     } else {
                         name
                     })
-                    .color(MUTED),
+                    .color(self.preferences.palette().muted),
                 )
                 .on_hover_text(
                     self.path
@@ -1024,6 +1117,9 @@ impl EditorApp {
                         self.find_focus = false;
                     }
                     if response.has_focus() {
+                        if self.editor_focus {
+                            self.cancel_vim_input();
+                        }
                         self.editor_focus = false;
                     }
                     let enter = response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
@@ -1045,6 +1141,9 @@ impl EditorApp {
                         egui::TextEdit::singleline(&mut self.replacement).desired_width(220.0),
                     );
                     if response.has_focus() {
+                        if self.editor_focus {
+                            self.cancel_vim_input();
+                        }
                         self.editor_focus = false;
                     }
                     if ui.button("Replace").clicked() {
@@ -1078,12 +1177,36 @@ impl EditorApp {
         });
     }
     fn footer(&mut self, root: &mut egui::Ui) {
+        let pair_status = match self.bracket_cache.resolve(
+            &self.doc,
+            self.cursor,
+            self.language,
+            self.highlight.as_ref(),
+        ) {
+            simptxt::brackets::PairResult::UnknownBudget => Some("Pair: beyond scan limit"),
+            simptxt::brackets::PairResult::UnknownSyntax => Some("Pair: syntax pending"),
+            _ => None,
+        };
         egui::Panel::bottom("status").show(root, |ui| {
             ui.horizontal(|ui| {
+                if self.vim_enabled {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "VIM · {}",
+                            format!("{:?}", self.vim.mode()).to_uppercase()
+                        ))
+                        .strong()
+                        .color(self.preferences.palette().accent),
+                    );
+                    if let Some(command) = self.vim.command_line() {
+                        ui.monospace(format!(":{command}"));
+                    }
+                    ui.separator();
+                }
                 ui.label(egui::RichText::new(&self.status).color(if self.ready {
-                    MUTED
+                    self.preferences.palette().muted
                 } else {
-                    Color32::YELLOW
+                    self.preferences.palette().warning
                 }));
                 if let Some(work) = &self.work {
                     let progress =
@@ -1108,10 +1231,14 @@ impl EditorApp {
                         .on_hover_text("Go to line · Ctrl/⌘ G")
                         .clicked()
                     {
+                        self.cancel_vim_input();
                         self.goto_open = true;
                         self.editor_focus = false;
                     }
                     ui.label(format!("{} bytes", self.doc.len()));
+                    if let Some(status) = pair_status {
+                        ui.weak(status);
+                    }
                     if self.highlight_cancel.is_some() {
                         ui.label(if self.highlight.is_some() {
                             "Indexing remaining syntax…"
@@ -1134,24 +1261,40 @@ impl EditorApp {
         let mut at = 0;
         for (r, token) in spans {
             if r.start > at && r.start <= text.len() {
-                job.append(&text[at..r.start], 0.0, text_format(TEXT));
+                job.append(
+                    &text[at..r.start],
+                    0.0,
+                    text_format(self.preferences.palette().text, self.preferences.font_size),
+                );
             }
             if r.start <= r.end && r.end <= text.len() {
                 let color = match token {
-                    TokenKind::Comment => Color32::from_rgb(118, 142, 126),
-                    TokenKind::String => Color32::from_rgb(202, 188, 130),
-                    TokenKind::Number => Color32::from_rgb(185, 154, 211),
-                    TokenKind::Keyword => Color32::from_rgb(113, 177, 222),
+                    TokenKind::Comment => self.preferences.palette().comment,
+                    TokenKind::String => self.preferences.palette().string,
+                    TokenKind::Number => self.preferences.palette().number,
+                    TokenKind::Keyword => self.preferences.palette().keyword,
                 };
-                job.append(&text[r.clone()], 0.0, text_format(color));
+                job.append(
+                    &text[r.clone()],
+                    0.0,
+                    text_format(color, self.preferences.font_size),
+                );
                 at = r.end;
             }
         }
         if at < text.len() {
-            job.append(&text[at..], 0.0, text_format(TEXT));
+            job.append(
+                &text[at..],
+                0.0,
+                text_format(self.preferences.palette().text, self.preferences.font_size),
+            );
         }
         if text.is_empty() {
-            job.append("", 0.0, text_format(TEXT));
+            job.append(
+                "",
+                0.0,
+                text_format(self.preferences.palette().text, self.preferences.font_size),
+            );
         }
         job
     }
@@ -1159,7 +1302,11 @@ impl EditorApp {
         let context = root.ctx().clone();
         let ctx = &context;
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(BG).inner_margin(8))
+            .frame(
+                egui::Frame::NONE
+                    .fill(self.preferences.palette().background)
+                    .inner_margin(8),
+            )
             .show(root, |ui| {
                 let available = ui.available_size();
                 let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
@@ -1167,8 +1314,8 @@ impl EditorApp {
                     .painter()
                     .layout_no_wrap(
                         self.doc.line_count().to_string(),
-                        FontId::monospace(12.0),
-                        MUTED,
+                        FontId::monospace(self.preferences.font_size * 0.8),
+                        self.preferences.palette().muted,
                     )
                     .size()
                     .x;
@@ -1178,11 +1325,17 @@ impl EditorApp {
                     Pos2::new(text_x, rect.top()),
                     Pos2::new(rect.right() - 16.0, rect.bottom() - 18.0),
                 );
-                self.visible_rows = (text_rect.height() / ROW_HEIGHT).floor().max(1.0) as usize;
-                self.visible_bytes =
-                    (text_rect.width() / (FONT_SIZE * 0.62)).floor().max(10.0) as usize;
+                self.visible_rows = (text_rect.height() / self.preferences.row_height())
+                    .floor()
+                    .max(1.0) as usize;
+                self.visible_bytes = (text_rect.width() / (self.preferences.font_size * 0.62))
+                    .floor()
+                    .max(10.0) as usize;
                 self.top_line = self.top_line.min(self.doc.line_count().saturating_sub(1));
                 if response.clicked() || response.drag_started() {
+                    if self.vim_enabled && self.vim.mode() != simptxt::vim::Mode::Insert {
+                        self.cancel_vim_input();
+                    }
                     self.editor_focus = true;
                     ui.memory_mut(|m| m.surrender_focus(m.focused().unwrap_or(response.id)));
                 }
@@ -1196,7 +1349,7 @@ impl EditorApp {
                         self.scroll_x -= step;
                         self.horizontal = signed_scroll(self.horizontal, step);
                     } else {
-                        self.scroll_y += -delta.y / ROW_HEIGHT;
+                        self.scroll_y += -delta.y / self.preferences.row_height();
                         let step = self.scroll_y.trunc();
                         self.scroll_y -= step;
                         self.top_line = signed_scroll(self.top_line, step)
@@ -1204,6 +1357,15 @@ impl EditorApp {
                     }
                 }
                 let painter = ui.painter().with_clip_rect(text_rect);
+                let bracket_pair = match self.bracket_cache.resolve(
+                    &self.doc,
+                    self.cursor,
+                    self.language,
+                    self.highlight.as_ref(),
+                ) {
+                    simptxt::brackets::PairResult::Match { open, close } => Some([open, close]),
+                    _ => None,
+                };
                 let selection = self.selection();
                 let cursor_line = self.doc.line_of_offset(self.cursor);
                 let mut click = None;
@@ -1214,7 +1376,7 @@ impl EditorApp {
                     if line >= self.doc.line_count() {
                         break;
                     }
-                    let y = text_rect.top() + i as f32 * ROW_HEIGHT;
+                    let y = text_rect.top() + i as f32 * self.preferences.row_height();
                     let range = view::row_range(
                         &self.doc,
                         line,
@@ -1230,17 +1392,17 @@ impl EditorApp {
                         Pos2::new(text_x - 14.0, y + 2.0),
                         egui::Align2::RIGHT_TOP,
                         (line + 1).to_string(),
-                        FontId::monospace(12.0),
-                        MUTED,
+                        FontId::monospace(self.preferences.font_size * 0.8),
+                        self.preferences.palette().muted,
                     );
                     if cursor_line == line {
                         painter.rect_filled(
                             Rect::from_min_size(
                                 Pos2::new(text_x, y),
-                                Vec2::new(text_rect.width(), ROW_HEIGHT),
+                                Vec2::new(text_rect.width(), self.preferences.row_height()),
                             ),
                             0.0,
-                            Color32::from_rgb(26, 33, 43),
+                            self.preferences.palette().current_line,
                         );
                     }
                     let a = selection.start.max(range.start);
@@ -1259,10 +1421,13 @@ impl EditorApp {
                         painter.rect_filled(
                             Rect::from_min_max(
                                 Pos2::new(text_x + x1, y),
-                                Pos2::new(text_x + x2.max(x1 + 2.0), y + ROW_HEIGHT),
+                                Pos2::new(
+                                    text_x + x2.max(x1 + 2.0),
+                                    y + self.preferences.row_height(),
+                                ),
                             ),
                             2.0,
-                            Color32::from_rgb(45, 76, 96),
+                            self.preferences.palette().selection,
                         );
                     }
                     if self.cursor >= range.start && self.cursor <= range.end && cursor_line == line
@@ -1283,24 +1448,54 @@ impl EditorApp {
                         }
                         let cr = Rect::from_min_size(
                             Pos2::new(text_x + x, y + 1.0),
-                            Vec2::new(1.5, ROW_HEIGHT - 3.0),
+                            Vec2::new(1.5, self.preferences.row_height() - 3.0),
                         );
                         caret = Some(cr);
-                        if self.editor_focus && self.ready {
-                            painter.rect_filled(cr, 0.0, ACCENT);
-                        }
                     }
                     if let Some(p) = pointer
                         && p.x <= text_rect.right()
                         && p.y < text_rect.bottom()
                         && p.y >= y
-                        && p.y < y + ROW_HEIGHT
+                        && p.y < y + self.preferences.row_height()
                         && (response.clicked() || response.dragged() || response.drag_started())
                     {
                         let c = galley.cursor_from_pos(p - pos);
                         click = Some(range.start + view::byte_at_char(text, c.index.into()));
                     }
-                    painter.galley(pos, galley, TEXT);
+                    painter.galley(pos, galley.clone(), self.preferences.palette().text);
+                    if let Some(pair) = bracket_pair {
+                        for offset in pair {
+                            if offset >= range.start && offset < range.end {
+                                let column = text[..offset - range.start].chars().count();
+                                let left = galley
+                                    .pos_from_cursor(egui::text::CCursor::new(column))
+                                    .left();
+                                let right = galley
+                                    .pos_from_cursor(egui::text::CCursor::new(column + 1))
+                                    .left();
+                                // Keep the outline separate from selection fill and glyphs.
+                                painter.rect_stroke(
+                                    Rect::from_min_max(
+                                        Pos2::new(text_x + left - 1.0, y),
+                                        Pos2::new(
+                                            text_x + right.max(left + 2.0) + 1.0,
+                                            y + self.preferences.row_height() - 2.0,
+                                        ),
+                                    ),
+                                    2.0,
+                                    egui::Stroke::new(1.5, self.preferences.palette().accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                        }
+                    }
+                    if cursor_line == line
+                        && self.editor_focus
+                        && self.ready
+                        && let Some(caret) = caret
+                    {
+                        painter.rect_filled(caret, 0.0, self.preferences.palette().accent);
+                    }
                     self.rendered_rows += 1;
                 }
                 self.reveal_cursor = false;
@@ -1328,8 +1523,8 @@ impl EditorApp {
                             caret.left_bottom(),
                             egui::Align2::LEFT_TOP,
                             &self.composition,
-                            FontId::monospace(FONT_SIZE),
-                            ACCENT,
+                            FontId::monospace(self.preferences.font_size),
+                            self.preferences.palette().accent,
                         );
                     }
                 }
@@ -1390,8 +1585,13 @@ impl EditorApp {
                         self.error = None;
                     }
                 });
+            return;
         }
-        if self.pending.is_some() {
+        if self.pending.is_some()
+            && self.overwrite.is_none()
+            && self.conflict.is_none()
+            && !self.dialog_pending
+        {
             egui::Window::new("Unsaved changes")
                 .collapsible(false)
                 .resizable(false)
@@ -1420,6 +1620,12 @@ impl EditorApp {
                             self.perform(p, ctx);
                         }
                         if ui.button("Cancel").clicked() {
+                            if matches!(
+                                self.pending,
+                                Some(Pending::CloseTab | Pending::QuitWorkspace)
+                            ) {
+                                self.workspace_actions.push(WorkspaceAction::CancelClose);
+                            }
                             self.pending = None;
                             self.continue_after_save = false;
                         }
@@ -1490,11 +1696,6 @@ impl eframe::App for EditorApp {
     }
 }
 impl EditorApp {
-    pub(crate) fn headless(ctx: &egui::Context, path: &std::path::Path) -> Self {
-        let mut app = Self::create(ctx, false);
-        app.open_path(path.to_path_buf(), ctx);
-        app
-    }
     /// Exercise the real input/edit/undo path for an offscreen GPU benchmark.
     /// This is in-process input, not native OS keyboard automation.
     pub(crate) fn headless_exercise(&mut self, ctx: &egui::Context, step: usize) {
@@ -1607,9 +1808,9 @@ impl Drop for EditorApp {
         self.cancel_highlight();
     }
 }
-fn text_format(color: Color32) -> egui::TextFormat {
+fn text_format(color: Color32, font_size: f32) -> egui::TextFormat {
     egui::TextFormat {
-        font_id: FontId::monospace(FONT_SIZE),
+        font_id: FontId::monospace(font_size),
         color,
         ..Default::default()
     }

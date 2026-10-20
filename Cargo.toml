@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = ["desktop"]
-desktop = ["dep:eframe", "dep:rfd", "dep:image", "dep:pollster"]
+desktop = ["dep:eframe", "dep:rfd", "dep:image", "dep:pollster", "dep:same-file"]
 
 [dependencies]
 memchr = "2.8"
@@ -16,6 +16,7 @@ eframe = { version = "0.36.2", default-features = false, features = ["default_fo
 rfd = { version = "0.17.2", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 pollster = { version = "0.4", optional = true }
+same-file = { version = "1.0.6", optional = true }
 
 [[bin]]
 name = "simptxt"

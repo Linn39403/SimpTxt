@@ -2133,6 +2133,7 @@ dependencies = [
  "memchr",
  "pollster 0.4.0",
  "rfd",
+ "same-file",
  "tempfile",
 ]
 

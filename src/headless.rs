@@ -3,19 +3,29 @@
 //! This uses the same EditorApp, document loading, highlighting, layout, font
 //! atlas and egui-wgpu renderer as the native app. It is not a mockup renderer.
 
-use crate::app::EditorApp;
+use crate::{app::WorkspaceApp, preferences::Theme};
 use eframe::{egui, egui_wgpu, wgpu};
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 800;
 
+#[derive(Default)]
+pub(crate) struct CaptureOptions {
+    pub theme: Theme,
+    pub vim: bool,
+    pub folder: Option<PathBuf>,
+    pub tabs: Vec<PathBuf>,
+    pub cursor_byte: Option<usize>,
+}
+
 pub(crate) fn screenshot(
     output: &Path,
     input: &Path,
     benchmark: bool,
+    options: CaptureOptions,
 ) -> Result<(), Box<dyn Error>> {
     // Fail early for a missing fixture rather than silently capturing an error UI.
     let input_bytes = std::fs::metadata(input)?.len();
@@ -54,12 +64,20 @@ pub(crate) fn screenshot(
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(1.0);
     let started = Instant::now();
-    let mut app = EditorApp::headless(&ctx, input);
+    let mut app = WorkspaceApp::headless(&ctx, input);
+    app.configure_capture(
+        options.theme,
+        options.vim,
+        options.folder,
+        options.tabs,
+        &ctx,
+    );
     let mut frames = 0;
     let mut ready_frames = 0;
     let mut first_frame_ms = None;
     let mut editable_ms = None;
     let mut exercise_step = 0;
+    let mut cursor_applied = options.cursor_byte.is_none();
     let mut edit_frame_ms = Vec::new();
     let deadline = Duration::from_secs(if benchmark { 120 } else { 20 });
     loop {
@@ -71,6 +89,10 @@ pub(crate) fn screenshot(
             .into());
         }
         let frame_started = Instant::now();
+        if !cursor_applied && app.ready_to_capture() {
+            app.capture_cursor(options.cursor_byte.expect("capture cursor was requested"));
+            cursor_applied = true;
+        }
         let exercise_this_frame = benchmark && ready_frames >= 3 && exercise_step < 6;
         if exercise_this_frame {
             app.headless_exercise(&ctx, exercise_step);
