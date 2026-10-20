@@ -2,6 +2,7 @@ mod app;
 mod headless;
 mod preferences;
 mod project_tree;
+mod settings;
 mod view;
 
 fn main() -> eframe::Result {

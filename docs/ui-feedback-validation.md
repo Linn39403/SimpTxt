@@ -1,6 +1,6 @@
 # Startup and sidebar feedback — 2026-10-20
 
-These changes follow the workspace implementation merged in [PR #1](https://github.com/Linn39403/SimpTxt/pull/1), at `40cfa7d0334e0fbb332e76b63c4d6652af8bfda8`. They are a separate follow-up, not part of that initial PR.
+These changes follow the workspace implementation merged in [PR #1](https://github.com/Linn39403/SimpTxt/pull/1), at `40cfa7d0334e0fbb332e76b63c4d6652af8bfda8`. They are a separate follow-up, not part of that initial PR. Test totals and provenance below are historical. Shared screenshot assets are refreshed for the latest UI; see [current editing/performance validation](review-fixes-validation.md) for the latest source and captures.
 
 ## Startup recovery
 

@@ -1,0 +1,220 @@
+{
+  "schema": 1,
+  "trials": 1,
+  "cache": "uncontrolled generated fixture",
+  "results": [
+    {
+      "family": "source",
+      "fixture_bytes": 1000000000,
+      "metrics_ms": {
+        "first_preview_read": [
+          0.078348
+        ],
+        "full_load": [
+          5744.918855
+        ],
+        "editing_ready_since_open": [
+          5745.074318
+        ],
+        "noop_save": [
+          1754.764868
+        ],
+        "edit_end": [
+          3.534792
+        ],
+        "edit_middle": [
+          2.471066
+        ],
+        "edit_beginning": [
+          2.302123
+        ],
+        "undo_one_edit": [
+          0.636054,
+          0.628312,
+          0.632639
+        ],
+        "redo_one_edit": [
+          0.610416,
+          0.759119,
+          0.783515
+        ],
+        "save_cancellation_acknowledgment": [
+          0.062949
+        ],
+        "cancelled_save_total": [
+          0.353711
+        ],
+        "edited_save": [
+          250.344761
+        ],
+        "reopen_edited_file": [
+          1584.306288
+        ]
+      },
+      "process": {
+        "family": "source",
+        "fixture_bytes": 1000000000,
+        "exit_code": 0,
+        "wall_seconds": 20.159562150976853,
+        "peak_rss_kib": 1013520,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--no-default-features",
+          "--test",
+          "large_file",
+          "one_gigabyte_open_edit_save",
+          "--",
+          "--ignored",
+          "--exact",
+          "--nocapture"
+        ],
+        "note": "Process summary includes Cargo/build when needed; operation timings are in the separate log. Single uncontrolled generated-cache trial."
+      }
+    },
+    {
+      "family": "logs",
+      "fixture_bytes": 1000000000,
+      "metrics_ms": {
+        "first_preview_read": [
+          0.030335
+        ],
+        "full_load": [
+          1841.250641
+        ],
+        "editing_ready_since_open": [
+          1841.32374
+        ],
+        "noop_save": [
+          419.923478
+        ],
+        "edit_end": [
+          3.004266
+        ],
+        "edit_middle": [
+          2.508853
+        ],
+        "edit_beginning": [
+          2.083586
+        ],
+        "undo_one_edit": [
+          0.658638,
+          0.655994,
+          0.61328
+        ],
+        "redo_one_edit": [
+          0.631517,
+          0.815133,
+          0.614191
+        ],
+        "save_cancellation_acknowledgment": [
+          0.057446
+        ],
+        "cancelled_save_total": [
+          0.328143
+        ],
+        "edited_save": [
+          236.433823
+        ],
+        "reopen_edited_file": [
+          1572.475876
+        ]
+      },
+      "process": {
+        "family": "logs",
+        "fixture_bytes": 1000000000,
+        "exit_code": 0,
+        "wall_seconds": 6.58075176901184,
+        "peak_rss_kib": 1013024,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--no-default-features",
+          "--test",
+          "large_file",
+          "one_gigabyte_open_edit_save",
+          "--",
+          "--ignored",
+          "--exact",
+          "--nocapture"
+        ],
+        "note": "Process summary includes Cargo/build when needed; operation timings are in the separate log. Single uncontrolled generated-cache trial."
+      }
+    },
+    {
+      "family": "long",
+      "fixture_bytes": 1000000000,
+      "metrics_ms": {
+        "first_preview_read": [
+          0.029695
+        ],
+        "full_load": [
+          1928.527528
+        ],
+        "editing_ready_since_open": [
+          1928.594769
+        ],
+        "noop_save": [
+          450.229247
+        ],
+        "edit_end": [
+          3.94002
+        ],
+        "edit_middle": [
+          2.363486
+        ],
+        "edit_beginning": [
+          2.076275
+        ],
+        "undo_one_edit": [
+          0.625428,
+          0.645218,
+          0.605058
+        ],
+        "redo_one_edit": [
+          0.620441,
+          0.761372,
+          0.601723
+        ],
+        "save_cancellation_acknowledgment": [
+          0.079274
+        ],
+        "cancelled_save_total": [
+          0.378277
+        ],
+        "edited_save": [
+          230.660433
+        ],
+        "reopen_edited_file": [
+          1594.074496
+        ]
+      },
+      "process": {
+        "family": "long",
+        "fixture_bytes": 1000000000,
+        "exit_code": 0,
+        "wall_seconds": 6.771283438021783,
+        "peak_rss_kib": 1008824,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--no-default-features",
+          "--test",
+          "large_file",
+          "one_gigabyte_open_edit_save",
+          "--",
+          "--ignored",
+          "--exact",
+          "--nocapture"
+        ],
+        "note": "Process summary includes Cargo/build when needed; operation timings are in the separate log. Single uncontrolled generated-cache trial."
+      }
+    }
+  ]
+}

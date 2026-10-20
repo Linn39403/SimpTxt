@@ -1,6 +1,6 @@
 # Workspace feature validation — 2026-10-20
 
-This records the workspace updates on `feature/minimal-editor`, based on `5a3da9686bdd563064d7a17f3de66436f8fac8f7`. It is targeted prototype validation, not full Vim compatibility, v1 acceptance, or a cross-platform performance guarantee.
+This records the workspace updates on `feature/minimal-editor`, based on `5a3da9686bdd563064d7a17f3de66436f8fac8f7`. It is historical targeted prototype validation, not full Vim compatibility, v1 acceptance, or a cross-platform performance guarantee. Shared screenshot assets now show the latest UI. Later input, memory and highlighting changes are validated [separately](review-fixes-validation.md); the original budget description and timings below must not be read as current-source results.
 
 ## Automated checks
 

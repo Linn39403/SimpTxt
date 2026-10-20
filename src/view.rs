@@ -74,6 +74,115 @@ pub fn byte_at_char(text: &str, character: usize) -> usize {
         .map_or(text.len(), |(i, _)| i)
 }
 
+/// Map a caret through sorted simultaneous edits. Positions on an inserted
+/// prefix follow the original text; positions inside a deletion clamp to it.
+pub fn map_offset(offset: usize, ranges: &[Range<usize>], inserted: usize) -> usize {
+    let mut removed = 0;
+    let mut added = 0;
+    for range in ranges {
+        if offset < range.start {
+            break;
+        }
+        if offset <= range.end {
+            return range.start - removed + added + inserted;
+        }
+        removed += range.len();
+        added += inserted;
+    }
+    offset - removed + added
+}
+
+const WORD_SCAN_BYTES: usize = 64 * 1024;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordClass {
+    Space,
+    Word,
+    Punctuation,
+}
+fn word_class(character: char) -> WordClass {
+    if character.is_whitespace() {
+        WordClass::Space
+    } else if character.is_alphanumeric() || character == '_' {
+        WordClass::Word
+    } else {
+        WordClass::Punctuation
+    }
+}
+
+/// Ordinary Ctrl/Option word movement, bounded even on a gigabyte-long token.
+/// Hitting the scan limit refuses the whole motion/deletion, never a prefix.
+pub fn word_target(doc: &Document, cursor: usize, backwards: bool) -> Result<usize, &'static str> {
+    const LIMIT: &str =
+        "Word motion exceeds the 64 KiB scan limit; use Home/End or select a smaller region";
+    let minimum = content_start(doc);
+    if backwards {
+        if cursor <= minimum {
+            return Ok(minimum);
+        }
+        let mut start = cursor.saturating_sub(WORD_SCAN_BYTES).max(minimum);
+        while start < cursor && !doc.char_boundary(start) {
+            start += 1;
+        }
+        let bytes = doc.read(start..cursor);
+        let text = std::str::from_utf8(&bytes).expect("validated UTF-8 document");
+        let mut characters = text.char_indices().rev().peekable();
+        let mut position = cursor;
+        while let Some(&(offset, character)) = characters.peek() {
+            if word_class(character) != WordClass::Space {
+                break;
+            }
+            position = start + offset;
+            characters.next();
+        }
+        if let Some(&(_, character)) = characters.peek() {
+            let class = word_class(character);
+            while let Some(&(offset, character)) = characters.peek() {
+                if word_class(character) != class {
+                    break;
+                }
+                position = start + offset;
+                characters.next();
+            }
+        }
+        if characters.peek().is_none() && start > minimum {
+            Err(LIMIT)
+        } else {
+            Ok(position)
+        }
+    } else {
+        if cursor >= doc.len() {
+            return Ok(doc.len());
+        }
+        let mut end = cursor.saturating_add(WORD_SCAN_BYTES).min(doc.len());
+        while end > cursor && !doc.char_boundary(end) {
+            end -= 1;
+        }
+        let bytes = doc.read(cursor..end);
+        let text = std::str::from_utf8(&bytes).expect("validated UTF-8 document");
+        let mut characters = text.char_indices().peekable();
+        if let Some(&(_, character)) = characters.peek() {
+            let class = word_class(character);
+            while let Some(&(_, character)) = characters.peek() {
+                if word_class(character) != class {
+                    break;
+                }
+                characters.next();
+            }
+        }
+        while let Some(&(_, character)) = characters.peek() {
+            if word_class(character) != WordClass::Space {
+                break;
+            }
+            characters.next();
+        }
+        match characters.next() {
+            Some((offset, _)) => Ok(cursor + offset),
+            None if end == doc.len() => Ok(end),
+            None => Err(LIMIT),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

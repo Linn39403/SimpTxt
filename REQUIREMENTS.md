@@ -36,7 +36,7 @@ No IDE features, AI, plugin system, embedded terminal, project-wide indexing, la
 - **F-01 [User]: Open fast.** Show a useful, interactive first viewport without waiting for a complete file read, line count, syntax scan, or other whole-file processing. Display actual content, not just an empty editor or loading screen.
 - **F-02 [User]: Edit large files.** Insert, delete, select, copy, cut, and paste at the beginning, middle, and end of files up to 1 GB. Scrolling, horizontal navigation, and small edits must not require repeated whole-file copies or scans.
 - **F-03 [Derived]: Basic editing controls.** Provide keyboard navigation, selection, standard platform shortcuts, undo/redo, and an obvious modified-file indicator. Group undo into understandable user actions. Document any history limit.
-- **F-04 [Derived]: Find and replace.** Provide literal text find, next/previous match, replace current, and replace all. Whole-file work must be cancellable. Replace all must be undoable as one action; cancellation must leave either the original document or a clearly reported, undoable result. Regex and project-wide search are out of scope.
+- **F-04 [Derived]: Find and replace.** Provide literal text find, next/previous match, replace current, and replace all. Whole-file work must be cancellable. Replace all must be undoable as one action. If its undo record exceeds the documented history budget, reject it before mutation with a clear limit message. Cancellation must leave the original document unchanged. Regex and project-wide search are out of scope.
 - **F-05 [User]: Save and Save As.** Save all edits, including those near the end of a 1 GB file. Keep the editor responsive and report completion or failure accurately.
 
 ## 3. Syntax highlighting

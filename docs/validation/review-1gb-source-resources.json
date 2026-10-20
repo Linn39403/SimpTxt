@@ -1,0 +1,22 @@
+{
+  "family": "source",
+  "fixture_bytes": 1000000000,
+  "exit_code": 0,
+  "wall_seconds": 20.159562150976853,
+  "peak_rss_kib": 1013520,
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--release",
+    "--no-default-features",
+    "--test",
+    "large_file",
+    "one_gigabyte_open_edit_save",
+    "--",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "note": "Process summary includes Cargo/build when needed; operation timings are in the separate log. Single uncontrolled generated-cache trial."
+}

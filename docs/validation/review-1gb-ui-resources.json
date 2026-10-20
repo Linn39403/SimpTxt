@@ -1,0 +1,21 @@
+{
+  "exit_code": 0,
+  "wall_seconds": 20.711968988995068,
+  "peak_rss_kib": 1109048,
+  "command": [
+    "target/debug/simptxt",
+    "--headless-benchmark",
+    "benchmark-artifacts/review-1gb.png",
+    "benchmark-artifacts/ui-fixture/source-1000000000.txt",
+    "--vim",
+    "--folder",
+    "src",
+    "--tab",
+    "Cargo.toml"
+  ],
+  "fixture_bytes": 1000000000,
+  "profile": "dev (package opt-level=1; dependencies unoptimized)",
+  "adapter": "llvmpipe LLVM 19.1.7 Vulkan",
+  "input_method": "in_process",
+  "note": "Peak RSS is maximum child usage; smaller screenshot children ran first."
+}

@@ -39,7 +39,19 @@ struct QuitState {
     prompted: Option<TabId>,
 }
 
+struct DiskCheck {
+    id: TabId,
+    generation: u64,
+    path: PathBuf,
+    expected: FileStamp,
+    observed: ExternalState,
+}
+
 enum WorkspaceMessage {
+    DiskChecked {
+        job: u64,
+        results: Vec<DiskCheck>,
+    },
     Folder {
         generation: u64,
         path: Option<PathBuf>,
@@ -65,11 +77,58 @@ pub struct WorkspaceApp {
     suppress_input: bool,
     startup_warning: Option<String>,
     startup_load: Option<(TabId, u64)>,
+    settings: Option<crate::settings::Persistence>,
+    settings_notice: Option<String>,
+    disk_monitor_enabled: bool,
+    disk_check_pending: bool,
+    disk_check_id: u64,
+    disk_next_check: Instant,
+    dropped_paths: std::collections::VecDeque<PathBuf>,
 }
 
 impl WorkspaceApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, smoke: bool) -> Self {
-        Self::from_startup_path(&cc.egui_ctx, path, smoke)
+        let mut app = Self::from_startup_path(&cc.egui_ctx, path, smoke);
+        app.disk_monitor_enabled = !smoke;
+        if !smoke && let Some(path) = crate::settings::default_path() {
+            app.install_settings(path, &cc.egui_ctx);
+        }
+        app
+    }
+
+    fn install_settings(&mut self, path: PathBuf, ctx: &egui::Context) {
+        match crate::settings::load(&path) {
+            Ok(settings) => {
+                self.preferences = settings.editor;
+                self.vim_enabled = settings.vim;
+                self.preferences.apply_theme(ctx);
+                for tab in &mut self.tabs {
+                    tab.editor.preferences = settings.editor;
+                    tab.editor.vim_enabled = settings.vim;
+                    tab.editor.cancel_vim_input();
+                }
+                self.settings = Some(crate::settings::Persistence::new(path, settings));
+            }
+            Err(error) => {
+                self.settings_notice =
+                    Some(format!("Preferences not loaded or overwritten: {error}"))
+            }
+        }
+    }
+
+    fn persist_settings(&mut self, ctx: &egui::Context) {
+        if let Some(persistence) = &mut self.settings {
+            let settings = crate::settings::Settings {
+                editor: self.preferences,
+                vim: self.vim_enabled,
+            };
+            if let Some(error) = persistence.update(settings) {
+                self.settings_notice = Some(format!("Preferences were not saved: {error}"));
+            }
+            if persistence.is_pending() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
     }
 
     /// A missing startup path opens a quiet Untitled buffer. Other startup
@@ -119,6 +178,13 @@ impl WorkspaceApp {
             suppress_input: false,
             startup_warning: None,
             startup_load: None,
+            settings: None,
+            settings_notice: None,
+            disk_monitor_enabled: false,
+            disk_check_pending: false,
+            disk_check_id: 0,
+            disk_next_check: Instant::now(),
+            dropped_paths: Default::default(),
         }
     }
 
@@ -234,15 +300,22 @@ impl WorkspaceApp {
     }
 
     fn resident_bytes(&self) -> usize {
-        self.tabs.iter().fold(0usize, |total, tab| {
-            let editor = &tab.editor;
-            let reserved = editor
+        // Live snapshots include undo and background jobs, even for closed tabs.
+        // Cover the short handoff before a newly spawned loader takes its token;
+        // global tokens also cover cancelled/closed jobs that have not exited yet.
+        let pending = self.tabs.iter().fold(0usize, |total, tab| {
+            let reserved = tab
+                .editor
                 .work
                 .as_ref()
                 .filter(|work| work.label == "Opening")
-                .map_or(0, |work| work.total);
-            total.saturating_add(editor.doc.len().max(reserved))
-        })
+                .map_or(0, |work| {
+                    simptxt::document::estimated_document_bytes(work.total)
+                });
+            total.saturating_add(reserved)
+        });
+        simptxt::document::resident_document_bytes()
+            .saturating_add(pending.max(simptxt::document::reserved_document_bytes()))
     }
 
     fn matching_tab(&self, path: &Path, excluding: Option<TabId>) -> Option<TabId> {
@@ -285,8 +358,10 @@ impl WorkspaceApp {
             return;
         }
         let size = usize::try_from(stamp.len).unwrap_or(usize::MAX);
-        if size > MAX_OPEN_DOCUMENT_BYTES.saturating_sub(self.resident_bytes()) {
-            self.error(owner, "Opening this file would exceed the 2 GiB combined open-document budget. Close another tab first. No existing document was changed.".into());
+        if simptxt::document::estimated_document_bytes(size)
+            > MAX_OPEN_DOCUMENT_BYTES.saturating_sub(self.resident_bytes())
+        {
+            self.error(owner, "Opening this file would exceed the 2 GiB tracked document-memory budget. Close another tab first. No existing document was changed.".into());
             return;
         }
         let loading = self
@@ -340,22 +415,12 @@ impl WorkspaceApp {
             self.error(owner, "Cannot reload: this destination is owned by another open tab. Your existing buffer and undo history are unchanged.".into());
             return;
         }
-        let other_bytes =
-            self.tabs
-                .iter()
-                .filter(|tab| tab.id != owner)
-                .fold(0usize, |total, tab| {
-                    let reserved = tab
-                        .editor
-                        .work
-                        .as_ref()
-                        .filter(|work| work.label == "Opening")
-                        .map_or(0, |work| work.total);
-                    total.saturating_add(tab.editor.doc.len().max(reserved))
-                });
         let size = usize::try_from(stamp.len).unwrap_or(usize::MAX);
-        if size > MAX_OPEN_DOCUMENT_BYTES.saturating_sub(other_bytes) {
-            self.error(owner, "Reloading this file would exceed the 2 GiB combined open-document budget. Close another tab first. Your existing buffer and undo history are unchanged.".into());
+        // Retain the old document and its history until the replacement loads successfully.
+        if simptxt::document::estimated_document_bytes(size)
+            > MAX_OPEN_DOCUMENT_BYTES.saturating_sub(self.resident_bytes())
+        {
+            self.error(owner, "Reloading this file would exceed the 2 GiB tracked document-memory budget. Close another tab first. Your existing buffer and undo history are unchanged.".into());
             return;
         }
         if self
@@ -368,7 +433,7 @@ impl WorkspaceApp {
             self.error(owner, "Two file operations are already running. Wait for one to finish or cancel it before reloading. Your existing buffer and undo history are unchanged.".into());
             return;
         }
-        self.tabs[index].editor.open_path(path, ctx);
+        self.tabs[index].editor.reload_path(path, ctx);
         self.suppress_input = true;
     }
 
@@ -637,24 +702,152 @@ impl WorkspaceApp {
             tab.editor.poll(ctx);
         }
         self.finish_startup_open(ctx);
-        while let Ok(WorkspaceMessage::Folder { generation, path }) = self.rx.try_recv() {
-            if self.folder_dialog_request != Some(generation) {
-                continue;
+        while let Ok(message) = self.rx.try_recv() {
+            match message {
+                WorkspaceMessage::Folder { generation, path } => {
+                    if self.folder_dialog_request != Some(generation) {
+                        continue;
+                    }
+                    self.folder_dialog_request = None;
+                    self.folder_dialog_pending = false;
+                    self.suppress_input = true;
+                    if generation != self.folder_dialog_generation {
+                        continue;
+                    }
+                    if let Some(path) = path {
+                        self.deferred_project_path = None;
+                        self.project.set_root(path);
+                    }
+                }
+                WorkspaceMessage::DiskChecked { job, results } => {
+                    if !self.disk_check_pending || job != self.disk_check_id {
+                        continue;
+                    }
+                    self.disk_check_pending = false;
+                    for check in results {
+                        let Some(index) = self.index(check.id) else {
+                            continue;
+                        };
+                        let editor = &mut self.tabs[index].editor;
+                        if editor.generation != check.generation
+                            || editor.path.as_ref() != Some(&check.path)
+                            || editor.stamp.as_ref() != Some(&check.expected)
+                            || editor.work.is_some()
+                        {
+                            continue;
+                        }
+                        if editor.external_observed.as_ref() == Some(&check.observed) {
+                            continue;
+                        }
+                        editor.external_notice = match &check.observed {
+                            ExternalState::Current => None,
+                            ExternalState::Changed(_) => Some("File changed on disk. Your buffer is unchanged; use Reload to review the disk version.".into()),
+                            ExternalState::Missing => Some("File was removed from disk. Your buffer and unsaved edits are retained.".into()),
+                            ExternalState::Unavailable(error) => Some(format!("Cannot check the disk file; your buffer is unchanged: {error}")),
+                        };
+                        editor.external_observed = Some(check.observed);
+                    }
+                }
             }
-            self.folder_dialog_request = None;
-            self.folder_dialog_pending = false;
-            self.suppress_input = true;
-            if generation != self.folder_dialog_generation {
-                continue;
+        }
+        if self.disk_monitor_enabled {
+            if Instant::now() >= self.disk_next_check {
+                self.start_disk_check(ctx);
             }
-            if let Some(path) = path {
-                self.deferred_project_path = None;
-                self.project.set_root(path);
-            }
+            ctx.request_repaint_after(Duration::from_secs(2));
         }
         self.project.poll(ctx);
         self.process_actions(ctx);
         self.advance_quit(ctx);
+    }
+
+    fn start_disk_check(&mut self, ctx: &egui::Context) {
+        if self.disk_check_pending {
+            return;
+        }
+        self.disk_next_check = Instant::now() + Duration::from_secs(2);
+        let checks: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let editor = &tab.editor;
+                if !editor.ready || editor.work.is_some() {
+                    return None;
+                }
+                Some((
+                    tab.id,
+                    editor.generation,
+                    editor.path.clone()?,
+                    editor.stamp.clone()?,
+                ))
+            })
+            .collect();
+        if checks.is_empty() {
+            return;
+        }
+        self.disk_check_id = self.disk_check_id.wrapping_add(1);
+        let job = self.disk_check_id;
+        self.disk_check_pending = true;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let results = checks
+                .into_iter()
+                .map(|(id, generation, path, expected)| {
+                    let observed = match FileStamp::read_for_open(&path) {
+                        Ok(stamp) if stamp == expected => ExternalState::Current,
+                        Ok(stamp) => ExternalState::Changed(stamp),
+                        Err(error) if error.kind() == Some(std::io::ErrorKind::NotFound) => {
+                            ExternalState::Missing
+                        }
+                        Err(error) => ExternalState::Unavailable(error.to_string()),
+                    };
+                    DiskCheck {
+                        id,
+                        generation,
+                        path,
+                        expected,
+                        observed,
+                    }
+                })
+                .collect();
+            let _ = tx.send(WorkspaceMessage::DiskChecked { job, results });
+            ctx.request_repaint();
+        });
+    }
+
+    fn dropped_files(&mut self, ctx: &egui::Context) {
+        let paths: Vec<_> = ctx
+            .input_mut(|input| std::mem::take(&mut input.raw.dropped_files))
+            .into_iter()
+            .map(|file| file.path().to_path_buf())
+            .collect();
+        for path in paths {
+            if self.dropped_paths.len() >= MAX_TABS {
+                self.active_editor().error = Some("Too many dropped files; at most 128 can be queued. Existing tabs are unchanged.".into());
+                break;
+            }
+            self.dropped_paths.push_back(path);
+        }
+        if self.modal_open() || self.quitting.is_some() {
+            return;
+        }
+        // Open only as many as the normal admission rules permit in this frame.
+        while self
+            .tabs
+            .iter()
+            .filter(|tab| tab.editor.work.is_some())
+            .count()
+            < MAX_CONCURRENT_LOADS
+        {
+            let Some(path) = self.dropped_paths.pop_front() else {
+                break;
+            };
+            self.open_path(path, ctx);
+            if self.modal_open() {
+                break;
+            }
+        }
     }
 
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
@@ -825,6 +1018,20 @@ impl WorkspaceApp {
         }
     }
 
+    fn settings_banner(&mut self, root: &mut egui::Ui) {
+        let Some(message) = self.settings_notice.clone() else {
+            return;
+        };
+        egui::Panel::top("settings_notice").show(root, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(self.preferences.palette().warning, message);
+                if ui.button("Dismiss").clicked() {
+                    self.settings_notice = None;
+                }
+            });
+        });
+    }
+
     fn startup_banner(&mut self, root: &mut egui::Ui) {
         let Some(warning) = self.startup_warning.as_ref() else {
             return;
@@ -911,6 +1118,7 @@ impl WorkspaceApp {
         let ctx = root.ctx().clone();
         self.suppress_input = false;
         self.poll(&ctx);
+        self.dropped_files(&ctx);
         if ctx.input(|input| {
             input
                 .events
@@ -943,6 +1151,7 @@ impl WorkspaceApp {
         }
         self.tab_bar(root);
         self.startup_banner(root);
+        self.settings_banner(root);
         let mut selected_path = None;
         if self.project.root().is_some() {
             let panel = egui::Panel::left("project_sidebar")
@@ -1015,6 +1224,7 @@ impl WorkspaceApp {
         }
         self.process_actions(&ctx);
         self.advance_quit(&ctx);
+        self.persist_settings(&ctx);
         // Only the selected document starts syntax work. Inactive workers can
         // finish and be polled, but switching does not launch N new scans.
         self.active_editor().start_highlight(&ctx);

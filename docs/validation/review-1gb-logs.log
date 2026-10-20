@@ -1,0 +1,26 @@
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running tests/large_file.rs (target/release/deps/large_file-1e488bc65e88ef17)
+
+running 1 test
+RUN family=logs actual_fixture_bytes=1000000000 trials=1 cache=uncontrolled_generated_fixture measurements=core_not_UI no_percentile_claim=true
+METRIC family=logs fixture_bytes=1000000000 case=first_preview_read elapsed_ns=30335 bytes=4096 decimal_MB_per_s=135.026
+METRIC family=logs fixture_bytes=1000000000 case=full_load elapsed_ns=1841250641 bytes=1000000000 decimal_MB_per_s=543.109
+METRIC family=logs fixture_bytes=1000000000 case=editing_ready_since_open elapsed_ns=1841323740 bytes=1000000000 decimal_MB_per_s=543.088
+METRIC family=logs fixture_bytes=1000000000 case=noop_save elapsed_ns=419923478 bytes=1000000000 decimal_MB_per_s=2381.386
+METRIC family=logs fixture_bytes=1000000000 case=edit_end elapsed_ns=3004266 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=edit_middle elapsed_ns=2508853 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=edit_beginning elapsed_ns=2083586 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=658638 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=655994 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=613280 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=631517 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=815133 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=614191 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=save_cancellation_acknowledgment elapsed_ns=57446 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=cancelled_save_total elapsed_ns=328143 bytes=524306 decimal_MB_per_s=1597.797
+METRIC family=logs fixture_bytes=1000000000 case=edited_save elapsed_ns=236433823 bytes=1000000035 decimal_MB_per_s=4229.513
+METRIC family=logs fixture_bytes=1000000000 case=reopen_edited_file elapsed_ns=1572475876 bytes=1000000035 decimal_MB_per_s=635.940
+test one_gigabyte_open_edit_save ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 6.47s
+

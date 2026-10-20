@@ -5,6 +5,8 @@ use simptxt::vim::{self, Action, ExCommand, InsertPlan, Mode, Operator};
 
 impl EditorApp {
     pub(super) fn cancel_vim_input(&mut self) {
+        self.break_typing_group();
+        self.preferred_column = None;
         if self.vim.mode() == Mode::Visual {
             self.anchor = None;
         }
@@ -26,8 +28,7 @@ impl EditorApp {
                 pressed: true,
                 ..
             } => {
-                let action = self.vim.handle(vim::Key::Escape);
-                self.apply_vim_action(action, ctx);
+                self.dispatch_vim_key(vim::Key::Escape, ctx);
                 true
             }
             egui::Event::Text(_)
@@ -53,9 +54,9 @@ impl EditorApp {
                     return true;
                 }
                 for (offset, c) in text.char_indices() {
-                    let action = self.vim.handle(vim::Key::Char(c));
-                    self.apply_vim_action(action, ctx);
-                    if self.modal_open()
+                    let (action, succeeded) = self.dispatch_vim_key(vim::Key::Char(c), ctx);
+                    if !succeeded
+                        || self.modal_open()
                         || !self.editor_focus
                         || matches!(action, Action::Message(_))
                     {
@@ -95,8 +96,7 @@ impl EditorApp {
                     _ => None,
                 };
                 if let Some(key) = key {
-                    let action = self.vim.handle(key);
-                    self.apply_vim_action(action, ctx);
+                    self.dispatch_vim_key(key, ctx);
                 }
                 // Ordinary application shortcuts run before the editor adapter.
                 // All other Key events must not fall into the non-Vim editor.
@@ -134,13 +134,36 @@ impl EditorApp {
         }
     }
 
-    fn vim_problem(&mut self, problem: impl std::fmt::Display) {
-        self.vim.reset();
-        self.anchor = None;
-        self.status = problem.to_string();
+    fn dispatch_vim_key(&mut self, key: vim::Key, ctx: &egui::Context) -> (Action, bool) {
+        // Parsing an operator can already leave Visual mode or enter Insert
+        // mode. Treat that transition as provisional until execution succeeds.
+        let mode = self.vim.mode();
+        let cursor = self.cursor;
+        let anchor = self.anchor;
+        let preferred_column = self.preferred_column;
+        let action = self.vim.handle(key);
+        let succeeded = self.apply_vim_action(action, ctx);
+        if !succeeded {
+            self.vim.set_mode(mode); // Cancel the failed command, not its selection.
+            self.cursor = cursor;
+            self.anchor = anchor;
+            self.preferred_column = preferred_column;
+        }
+        (action, succeeded)
     }
 
-    fn apply_vim_action(&mut self, action: Action, ctx: &egui::Context) {
+    fn vim_problem(&mut self, problem: impl std::fmt::Display) -> bool {
+        self.status = problem.to_string();
+        false
+    }
+
+    fn vim_edit_problem(&mut self, problem: String) -> bool {
+        // A modal dialog would deliberately reset Vim on focus loss and erase
+        // the Visual selection we just preserved. Report refusal in-place.
+        self.vim_problem(problem)
+    }
+
+    fn apply_vim_action(&mut self, action: Action, ctx: &egui::Context) -> bool {
         // Preview buffers must never be edited or yanked as if fully loaded.
         if !self.ready
             && !matches!(
@@ -148,8 +171,7 @@ impl EditorApp {
                 Action::None | Action::Normal { .. } | Action::Move { .. } | Action::Message(_)
             )
         {
-            self.vim_problem("Vim editing is available when loading finishes");
-            return;
+            return self.vim_problem("Vim editing is available when loading finishes");
         }
         match action {
             Action::None | Action::PassThrough => {}
@@ -166,23 +188,45 @@ impl EditorApp {
                 self.move_to(vim::normal_cursor(&self.doc, cursor), false);
             }
             Action::StartVisual => {
+                self.break_typing_group();
+                self.preferred_column = None;
                 self.cursor = vim::normal_cursor(&self.doc, self.cursor);
                 self.anchor = Some(self.cursor);
                 self.ensure_visible();
             }
             Action::EndVisual => {
+                self.break_typing_group();
+                self.preferred_column = None;
                 self.anchor = None;
+            }
+            Action::Move {
+                motion: vim::Motion::Up | vim::Motion::Down,
+                count,
+            } => {
+                let Action::Move { motion, .. } = action else {
+                    unreachable!()
+                };
+                let line = self.doc.line_of_offset(self.cursor);
+                let target = if motion == vim::Motion::Up {
+                    line.saturating_sub(count.min(vim::MAX_COUNT))
+                } else {
+                    line.saturating_add(count.min(vim::MAX_COUNT))
+                        .min(self.doc.line_count() - 1)
+                };
+                self.move_vertical(target, self.vim.mode() == Mode::Visual);
+                self.cursor = vim::normal_cursor(&self.doc, self.cursor);
+                self.ensure_visible();
             }
             Action::Move { motion, count } => {
                 match vim::motion_target(&self.doc, self.cursor, motion, count) {
                     Ok(cursor) => self.move_to(cursor, self.vim.mode() == Mode::Visual),
-                    Err(e) => self.vim_problem(e),
+                    Err(e) => return self.vim_problem(e),
                 }
             }
             Action::Insert(kind) => {
                 match vim::insert_plan(&self.doc, self.cursor, kind, self.newline()) {
-                    Ok(plan) => self.apply_vim_insert(plan, false),
-                    Err(e) => self.vim_problem(e),
+                    Ok(plan) => return self.apply_vim_insert(plan, false),
+                    Err(e) => return self.vim_problem(e),
                 }
             }
             Action::Operate {
@@ -190,27 +234,36 @@ impl EditorApp {
                 motion,
                 count,
             } => match vim::operator_range(&self.doc, self.cursor, operator, motion, count) {
-                Ok(plan) => self.apply_vim_operator(
-                    operator,
-                    plan.range,
-                    plan.register_range,
-                    plan.linewise,
-                ),
-                Err(e) => self.vim_problem(e),
+                Ok(plan) => {
+                    return self.apply_vim_operator(
+                        operator,
+                        plan.range,
+                        plan.register_range,
+                        plan.linewise,
+                    );
+                }
+                Err(e) => return self.vim_problem(e),
             },
             Action::OperateVisual(operator) => {
                 match vim::visual_range(&self.doc, self.anchor.unwrap_or(self.cursor), self.cursor)
                 {
-                    Ok(range) => self.apply_vim_operator(operator, range.clone(), range, false),
-                    Err(e) => self.vim_problem(e),
+                    Ok(range) => {
+                        return self.apply_vim_operator(operator, range.clone(), range, false);
+                    }
+                    Err(e) => return self.vim_problem(e),
                 }
             }
             Action::DeleteChars(count) => {
                 match vim::delete_chars_range(&self.doc, self.cursor, count) {
                     Ok(range) => {
-                        self.apply_vim_operator(Operator::Delete, range.clone(), range, false)
+                        return self.apply_vim_operator(
+                            Operator::Delete,
+                            range.clone(),
+                            range,
+                            false,
+                        );
                     }
-                    Err(e) => self.vim_problem(e),
+                    Err(e) => return self.vim_problem(e),
                 }
             }
             Action::Paste { before, count } => {
@@ -222,28 +275,18 @@ impl EditorApp {
                     count,
                     self.newline(),
                 ) {
-                    Ok(plan) => self.apply_vim_insert(plan, true),
-                    Err(e) => self.vim_problem(e),
+                    Ok(plan) => return self.apply_vim_insert(plan, true),
+                    Err(e) => return self.vim_problem(e),
                 }
             }
             Action::Undo(count) | Action::Redo(count) => {
                 let redo = matches!(action, Action::Redo(_));
-                let mut changed = false;
                 for _ in 0..count.min(vim::MAX_COUNT) {
-                    let success = if redo {
-                        self.doc.redo()
-                    } else {
-                        self.doc.undo()
-                    };
-                    if !success {
+                    if !self.restore_history(redo) {
                         break;
                     }
-                    changed = true;
                 }
                 self.anchor = None;
-                if changed {
-                    self.changed();
-                }
                 self.cursor = vim::normal_cursor(&self.doc, self.cursor);
                 self.ensure_visible();
             }
@@ -272,14 +315,18 @@ impl EditorApp {
                 }
             },
         }
+        true
     }
 
-    fn apply_vim_insert(&mut self, plan: InsertPlan, normal: bool) {
+    fn apply_vim_insert(&mut self, plan: InsertPlan, normal: bool) -> bool {
+        self.break_typing_group();
+        self.preferred_column = None;
+        let before = self.cursor_state();
+        let revision = self.doc.revision();
         if !plan.text.is_empty()
             && let Err(e) = self.doc.replace(plan.offset..plan.offset, &plan.text)
         {
-            self.vim_problem(e);
-            return;
+            return self.vim_edit_problem(e);
         }
         self.anchor = None;
         self.cursor = plan.cursor;
@@ -289,7 +336,9 @@ impl EditorApp {
         if normal {
             self.cursor = vim::normal_cursor(&self.doc, self.cursor);
         }
+        self.record_cursor_edit(revision, before);
         self.ensure_visible();
+        true
     }
 
     fn apply_vim_operator(
@@ -298,12 +347,15 @@ impl EditorApp {
         range: Range<usize>,
         register_range: Range<usize>,
         linewise: bool,
-    ) {
+    ) -> bool {
+        self.break_typing_group();
+        self.preferred_column = None;
+        let before = self.cursor_state();
+        let revision = self.doc.revision();
         // Helpers already enforce the limit. This defensive check also protects
         // future direct callers from allocating an entire large-file selection.
         if range.len() > vim::EDIT_LIMIT || register_range.len() > vim::EDIT_LIMIT {
-            self.vim_problem(vim::VimError::EditLimit);
-            return;
+            return self.vim_problem(vim::VimError::EditLimit);
         }
         let text =
             String::from_utf8(self.doc.read(register_range)).expect("validated UTF-8 document");
@@ -311,8 +363,7 @@ impl EditorApp {
             && !range.is_empty()
             && let Err(e) = self.doc.replace(range.clone(), "")
         {
-            self.vim_problem(e);
-            return;
+            return self.vim_edit_problem(e);
         }
         // Empty x/d motions must not overwrite a useful register.
         if !text.is_empty() || linewise {
@@ -329,6 +380,8 @@ impl EditorApp {
             self.vim.set_mode(Mode::Normal);
             self.cursor = vim::normal_cursor(&self.doc, self.cursor);
         }
+        self.record_cursor_edit(revision, before);
         self.ensure_visible();
+        true
     }
 }

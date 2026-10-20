@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "base_commit": "19afe1ca1ff5fd550db1fb98ac530d065998182b",
+  "description": "Exact final runtime/test sources and current captures. Git tree is independently verified at publication. Historical capture assets retain earlier provenance.",
+  "source_sha256": {
+    ".github/workflows/ci.yml": "8984c6779ac0cef46e1d37b1e4a50d1236527698ff07edce61ce84946e53366e",
+    "Cargo.lock": "4089b41b12b9661b093a547bd6c6456649eea77d06ff987edfc866c02639709a",
+    "Cargo.toml": "a778b59edc56731fcbaa827f5ada246113d96541d79515f582189f2424d8b6a5",
+    "src/app.rs": "968cfd7fc9b83424ef09a26097720f818373ac4264c9bc2f507a92c62af83570",
+    "src/app_highlight_tests.rs": "243e0685340bac764b3b2cdd6ad33278cf43dab2792224449617117c203bb018",
+    "src/app_input.rs": "8417488ef3b6f2e2b22bac42948959bf311d7ec3544f89fd49fccc688f7bef72",
+    "src/app_input_tests.rs": "7b7ab35dc6150a9718bd819cc8f0ab23a007cb4cf91232f68258529ad8e06931",
+    "src/app_safety_tests.rs": "9d41c4c2ca089f983514ed6e6bb15a050cb07073266646d1f6aff8b699a2ec74",
+    "src/app_vim.rs": "825b7ec9ebe18f9a2cff893f8aa050ba2af63cd6efae534fda2a873b517a7d37",
+    "src/brackets.rs": "6c740d6d4b5d658e56a144ae398f3c78f13ee241bc97cda1c76087c4cdd3caed",
+    "src/document.rs": "7f2ef6315148496bb5a1c72ffe8f27932cba5ecaa3f009c5ab065a61ba98a0b4",
+    "src/file_io.rs": "0f3a4d47c7f05467db0609bba366dfed545fae22f1857b69a33e902f3549d428",
+    "src/headless.rs": "36b7ef770a9b1a5219acd50c20dd893444fc21856c58edeab9ecb74094720643",
+    "src/lib.rs": "f4f3f69c60c326dc30920189fd43a658325ed7d924afcf705034c676ae18a39b",
+    "src/main.rs": "9a02f8aa4e74cf6fb6bd8d61027a452fb0895e775fe4a56c6dbde542a49e43ab",
+    "src/preferences.rs": "ae5263000b76591d41cbdf2d5c856a44beaea207b9cd67f4a7ab441beca88f8b",
+    "src/project_tree.rs": "c7724280858cd6d80587ae8a06f860ffdff344b8d105ed0d06ea34dd82935cac",
+    "src/search.rs": "ca7af726683599c1be77170f2d6f874682b67c29610a6adf24cc1c8d1b368f94",
+    "src/settings.rs": "781f5ad165d23bd58e9751e9f65e6ae2a5765549183edf2cb3b0c689e17a21a8",
+    "src/syntax.rs": "f2461ee1987125baef5d556790d826a27e5554731d021b534a4ee230b0d52996",
+    "src/view.rs": "076b0d79af4010fc5892b8c3fb5c7bd0f63b07b1c852846c3874e4f346cb65a1",
+    "src/vim.rs": "5d8c5515eea8870ec627d19b46dc123f116e96e3d959bcc4b673463294d7ec9d",
+    "src/workspace.rs": "8233394eb316de9a5e6d91af4361528e4c5a425a4e984ce3ccc3b89ec1028d48",
+    "src/workspace_regression_tests.rs": "2f4c62db6f0dce37b30330a06c9c1a72522290c412b80ed2b6ed0545c87c68bc",
+    "tests/document_randomized.rs": "16fd2eb09a33182d7fc082f622ecf3d606ed1daa3404cceef7b3b7772de29969",
+    "tests/large_file.rs": "48aa5693960cbb722ecb0adb3efc48536450bcd6229816766c4df620e6c931b9"
+  },
+  "current_capture_sha256": {
+    "docs/images/review-1gb.png": "0fb3655bea78fdf660a95a2d94789f5a1671676f285c450949a588e9731d4371",
+    "docs/images/simptxt-light.png": "ddda0c2d9f0c67783272a952b26c4a8abf7b4d4013f2688f5e69cecb2a5091dc",
+    "docs/images/simptxt.png": "52960a678bf268c2f63b84e04b1ae2536c5143c6bca88410111fa826b768cd69",
+    "docs/images/startup-clean.png": "ff94908ed8748caf47ac982eeb0b5619cf352e3e9528e1fa5e719886edaac144"
+  },
+  "tests": {
+    "default_passed": 291,
+    "core_only_passed": 120,
+    "opt_in_tests_skipped_in_default": 3,
+    "one_gigabyte_families_passed": [
+      "source",
+      "logs",
+      "long"
+    ],
+    "stress_chunk_cases": 25000,
+    "stress_edit_operations": 125000,
+    "fmt": "passed",
+    "clippy_warnings_denied": "passed",
+    "desktop_build": "passed",
+    "doc_tests": "passed (zero doctests)",
+    "native_smoke": "hosted CI pending; local executor cannot create native display sockets"
+  },
+  "independent_review": "31 new independent regressions plus separately authored input/core/highlight tests; final source rerun after review findings."
+}

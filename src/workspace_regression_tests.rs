@@ -1141,7 +1141,17 @@ fn bracket_cache_follows_syntax_completion_and_edit_invalidation() {
     assert_eq!(bracket_pair(&mut app, first), PairResult::UnknownSyntax);
     editor(&mut app, first).undo(false);
     assert_eq!(bytes(&mut app, first), original.as_bytes());
-    assert_eq!(bracket_pair(&mut app, first), PairResult::UnknownSyntax);
+    let active = editor(&mut app, first);
+    assert!(active.highlight.as_ref().unwrap().is_current(&active.doc));
+    // Undo returns to the exact revision indexed before the edit. Keeping that
+    // immutable index makes this pair reliable immediately, without relexing.
+    assert_eq!(
+        bracket_pair(&mut app, first),
+        PairResult::Match {
+            open: 0,
+            close: original.len() - 1
+        }
+    );
     assert!(!editor(&mut app, first).doc.is_modified());
 }
 
@@ -2292,4 +2302,733 @@ fn normal_asynchronous_open_failure_does_not_apply_startup_blank_recovery() {
     );
     editor(&mut app, first).undo(false);
     assert!(editor(&mut app, first).doc.is_empty());
+}
+
+#[derive(Debug)]
+struct ReviewDroppedFile(PathBuf);
+
+impl egui::DroppedFile for ReviewDroppedFile {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|error| error.to_string())
+    }
+}
+
+#[test]
+fn review_dropped_files_open_independent_tabs_without_replacing_dirty_text() {
+    let (ctx, mut app) = setup();
+    let original = app.active;
+    editor(&mut app, original).insert("keep these unsaved edits");
+    let revision = editor(&mut app, original).doc.revision();
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first.txt");
+    let second = directory.path().join("second.txt");
+    std::fs::write(&first, "first α\r\n").unwrap();
+    std::fs::write(&second, "second 💚\n").unwrap();
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 760.0))),
+            dropped_files: vec![
+                Arc::new(ReviewDroppedFile(first.clone())),
+                Arc::new(ReviewDroppedFile(second.clone())),
+            ],
+            events: vec![egui::Event::Text("must not leak into a new tab".into())],
+            ..Default::default()
+        },
+        |ui| app.render(ui),
+    );
+    output.textures_delta.clear();
+    await_loads(&mut app, &ctx);
+    assert_eq!(app.tabs.len(), 3);
+    assert_eq!(bytes(&mut app, original), b"keep these unsaved edits");
+    assert_eq!(editor(&mut app, original).doc.revision(), revision);
+    assert!(editor(&mut app, original).doc.is_modified());
+    for (path, expected) in [
+        (&first, "first α\r\n".as_bytes()),
+        (&second, "second 💚\n".as_bytes()),
+    ] {
+        let id = app
+            .tabs
+            .iter()
+            .find(|tab| tab.editor.path.as_ref() == Some(path))
+            .expect("dropped file was opened")
+            .id;
+        assert_eq!(bytes(&mut app, id), expected);
+        assert!(!editor(&mut app, id).doc.is_modified());
+    }
+    editor(&mut app, original).undo(false);
+    assert!(editor(&mut app, original).doc.is_empty());
+    assert_eq!(std::fs::read(first).unwrap(), "first α\r\n".as_bytes());
+    assert_eq!(std::fs::read(second).unwrap(), "second 💚\n".as_bytes());
+}
+
+#[test]
+fn review_dropping_an_already_open_file_keeps_its_dirty_revision_and_history() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("already-open.txt");
+    std::fs::write(&path, "disk contents").unwrap();
+    app.open_path(path.clone(), &ctx);
+    await_loads(&mut app, &ctx);
+    let opened = app.active;
+    editor(&mut app, opened).insert("local ");
+    let revision = editor(&mut app, opened).doc.revision();
+    let other = app.new_tab(&ctx);
+    editor(&mut app, other).insert("other unsaved document");
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 760.0))),
+            dropped_files: vec![Arc::new(ReviewDroppedFile(path.clone()))],
+            ..Default::default()
+        },
+        |ui| app.render(ui),
+    );
+    output.textures_delta.clear();
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.active, opened);
+    assert_eq!(bytes(&mut app, opened), b"local disk contents");
+    assert_eq!(editor(&mut app, opened).doc.revision(), revision);
+    assert!(editor(&mut app, opened).doc.is_modified());
+    assert_eq!(bytes(&mut app, other), b"other unsaved document");
+    editor(&mut app, opened).undo(false);
+    assert_eq!(bytes(&mut app, opened), b"disk contents");
+    assert!(!editor(&mut app, opened).doc.is_modified());
+    assert_eq!(std::fs::read(path).unwrap(), b"disk contents");
+}
+
+fn review_render_key(
+    ctx: &egui::Context,
+    app: &mut WorkspaceApp,
+    key: Key,
+    modifiers: egui::Modifiers,
+) {
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 760.0))),
+            events: vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                },
+            ],
+            ..Default::default()
+        },
+        |ui| app.render(ui),
+    );
+    output.textures_delta.clear();
+}
+
+fn review_await_search(ctx: &egui::Context, app: &mut WorkspaceApp, owner: TabId) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while editor(app, owner).search_work.is_some() {
+        app.poll(ctx);
+        assert!(Instant::now() < deadline, "small search did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn review_f3_and_shift_f3_find_in_both_directions_and_wrap_without_edits() {
+    let (ctx, mut app) = setup();
+    let owner = app.active;
+    seed(&mut app, owner, "hit one hit two hit");
+    editor(&mut app, owner).find = "hit".into();
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    review_render_key(&ctx, &mut app, Key::F3, Default::default());
+    review_await_search(&ctx, &mut app, owner);
+    assert_eq!(editor(&mut app, owner).selection(), 0..3);
+    review_render_key(&ctx, &mut app, Key::F3, shift);
+    review_await_search(&ctx, &mut app, owner);
+    assert_eq!(editor(&mut app, owner).selection(), 16..19);
+    review_render_key(&ctx, &mut app, Key::F3, Default::default());
+    review_await_search(&ctx, &mut app, owner);
+    assert_eq!(editor(&mut app, owner).selection(), 0..3);
+    assert_eq!(bytes(&mut app, owner), b"hit one hit two hit");
+    assert!(!editor(&mut app, owner).doc.is_modified());
+}
+
+#[test]
+fn review_find_shift_enter_searches_backwards_and_escape_returns_editor_focus() {
+    let (ctx, mut app) = setup();
+    let owner = app.active;
+    seed(&mut app, owner, "hit one hit two hit");
+    let active = editor(&mut app, owner);
+    active.find = "hit".into();
+    active.find_open = true;
+    active.find_focus = true;
+    active.editor_focus = false;
+    active.anchor = Some(8);
+    active.cursor = 11;
+    render_frame(&ctx, &mut app, Vec::new());
+    review_render_key(
+        &ctx,
+        &mut app,
+        Key::Enter,
+        egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    review_await_search(&ctx, &mut app, owner);
+    assert_eq!(editor(&mut app, owner).selection(), 0..3);
+    assert_eq!(editor(&mut app, owner).find, "hit");
+    assert!(!editor(&mut app, owner).doc.is_modified());
+    review_render_key(&ctx, &mut app, Key::Escape, Default::default());
+    assert!(!editor(&mut app, owner).find_open);
+    assert!(editor(&mut app, owner).editor_focus);
+    assert!(ctx.memory(|memory| memory.focused().is_none()));
+    render_frame(&ctx, &mut app, vec![egui::Event::Text("X".into())]);
+    assert_eq!(bytes(&mut app, owner), b"X one hit two hit");
+    assert_eq!(editor(&mut app, owner).find, "hit");
+    editor(&mut app, owner).undo(false);
+    assert_eq!(bytes(&mut app, owner), b"hit one hit two hit");
+    assert!(!editor(&mut app, owner).doc.is_modified());
+}
+
+#[test]
+fn review_find_enter_can_repeat_without_losing_search_focus_or_editing_text() {
+    let (ctx, mut app) = setup();
+    let owner = app.active;
+    seed(&mut app, owner, "hit one hit two hit");
+    let active = editor(&mut app, owner);
+    active.find = "hit".into();
+    active.find_open = true;
+    active.find_focus = true;
+    active.editor_focus = false;
+    render_frame(&ctx, &mut app, Vec::new());
+    for expected in [0..3, 8..11, 16..19] {
+        review_render_key(&ctx, &mut app, Key::Enter, Default::default());
+        review_await_search(&ctx, &mut app, owner);
+        assert_eq!(editor(&mut app, owner).selection(), expected);
+        assert!(!editor(&mut app, owner).editor_focus);
+        assert!(ctx.memory(|memory| memory.focused().is_some()));
+        assert_eq!(bytes(&mut app, owner), b"hit one hit two hit");
+        assert_eq!(editor(&mut app, owner).find, "hit");
+        assert!(!editor(&mut app, owner).doc.is_modified());
+    }
+}
+
+#[test]
+fn review_go_to_line_enter_moves_caret_and_restores_editor_focus() {
+    let (ctx, mut app) = setup();
+    let owner = app.active;
+    let original = "\u{feff}one\r\n二\nthree";
+    seed(&mut app, owner, original);
+    let active = editor(&mut app, owner);
+    active.goto = "2".into();
+    active.goto_open = true;
+    active.editor_focus = false;
+    let revision = active.doc.revision();
+    render_frame(&ctx, &mut app, Vec::new());
+    review_render_key(&ctx, &mut app, Key::Enter, Default::default());
+    assert!(!editor(&mut app, owner).goto_open);
+    assert!(!app.modal_open());
+    assert!(editor(&mut app, owner).editor_focus);
+    assert_eq!(editor(&mut app, owner).cursor, "\u{feff}one\r\n".len());
+    assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+    assert_eq!(bytes(&mut app, owner), original.as_bytes());
+    assert!(ctx.memory(|memory| memory.focused().is_none()));
+    render_frame(&ctx, &mut app, vec![egui::Event::Text("!".into())]);
+    assert_eq!(
+        bytes(&mut app, owner),
+        "\u{feff}one\r\n!二\nthree".as_bytes()
+    );
+    editor(&mut app, owner).undo(false);
+    assert_eq!(bytes(&mut app, owner), original.as_bytes());
+    assert!(!editor(&mut app, owner).doc.is_modified());
+}
+
+#[test]
+fn review_open_admission_counts_deleted_bytes_retained_for_undo() {
+    let (ctx, mut app) = setup();
+    let owner = app.active;
+    let original = "a".repeat(512 * 1024);
+    seed(&mut app, owner, &original);
+    let active = editor(&mut app, owner);
+    active.anchor = Some(0);
+    active.cursor = active.doc.len();
+    assert!(active.delete_selection());
+    assert!(active.doc.is_empty());
+    assert!(active.doc.is_modified());
+    let revision = active.doc.revision();
+    let other = app.new_tab(&ctx);
+    let mut reserved = work("Opening");
+    reserved.total = MAX_OPEN_DOCUMENT_BYTES - 128 * 1024;
+    editor(&mut app, other).work = Some(reserved);
+    editor(&mut app, other).ready = false;
+    app.switch_to(owner);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("small.txt");
+    std::fs::write(&path, b"small").unwrap();
+    app.open_path(path.clone(), &ctx);
+    assert_eq!(
+        app.tabs.len(),
+        2,
+        "Admission must count undo storage, not only visible bytes"
+    );
+    assert_eq!(app.active, owner);
+    assert!(editor(&mut app, owner).error.is_some());
+    assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+    assert!(editor(&mut app, owner).doc.is_empty());
+    assert!(editor(&mut app, owner).work.is_none());
+    editor(&mut app, owner).undo(false);
+    assert_eq!(bytes(&mut app, owner), original.as_bytes());
+    assert!(!editor(&mut app, owner).doc.is_modified());
+    assert_eq!(std::fs::read(path).unwrap(), b"small");
+}
+
+#[test]
+fn review_reload_admission_reserves_old_buffer_until_new_load_is_published() {
+    let (ctx, mut app) = setup();
+    let owner = app.active;
+    let original = "x".repeat(512 * 1024);
+    seed(&mut app, owner, &original);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reload-small.txt");
+    std::fs::write(&path, b"new").unwrap();
+    editor(&mut app, owner).path = Some(path.clone());
+    let revision = editor(&mut app, owner).doc.revision();
+    let other = app.new_tab(&ctx);
+    let mut reserved = work("Opening");
+    reserved.total = MAX_OPEN_DOCUMENT_BYTES - 128 * 1024;
+    editor(&mut app, other).work = Some(reserved);
+    editor(&mut app, other).ready = false;
+    app.reload_path(owner, path.clone(), &ctx);
+    assert!(editor(&mut app, owner).error.is_some());
+    assert!(editor(&mut app, owner).work.is_none());
+    assert!(editor(&mut app, owner).ready);
+    assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+    assert_eq!(bytes(&mut app, owner), original.as_bytes());
+    assert_eq!(editor(&mut app, owner).path.as_ref(), Some(&path));
+    assert_eq!(std::fs::read(path).unwrap(), b"new");
+}
+
+#[test]
+fn review_preferences_persist_across_workspaces_without_changing_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("preferences.conf");
+    std::fs::write(&path, "version=1\ntheme=light\nfont_size=22\nvim=true\n").unwrap();
+    let (ctx, mut app) = setup();
+    let original = app.active;
+    editor(&mut app, original).insert("private unsaved text");
+    let revision = editor(&mut app, original).doc.revision();
+    app.install_settings(path.clone(), &ctx);
+    assert_eq!(app.preferences.theme, Theme::Light);
+    assert_eq!(app.preferences.font_size, 22.0);
+    assert!(app.vim_enabled);
+    let preferences = app.preferences;
+    assert_eq!(editor(&mut app, original).preferences, preferences);
+    assert!(editor(&mut app, original).vim_enabled);
+    assert_eq!(editor(&mut app, original).doc.revision(), revision);
+    assert_eq!(bytes(&mut app, original), b"private unsaved text");
+    let second = app.new_tab(&ctx);
+    assert_eq!(editor(&mut app, second).preferences, preferences);
+    assert!(editor(&mut app, second).vim_enabled);
+    app.preferences.font_size = 18.0;
+    app.preferences.theme = Theme::Dark;
+    app.vim_enabled = false;
+    app.persist_settings(&ctx);
+    drop(app.settings.take());
+    let (next_ctx, mut next) = setup();
+    next.install_settings(path.clone(), &next_ctx);
+    assert_eq!(next.preferences.font_size, 18.0);
+    assert_eq!(next.preferences.theme, Theme::Dark);
+    assert!(!next.vim_enabled);
+    let next_id = next.active;
+    assert!(editor(&mut next, next_id).doc.is_empty());
+    assert!(editor(&mut next, next_id).path.is_none());
+    assert!(!std::fs::read_to_string(path).unwrap().contains("private"));
+    editor(&mut app, original).undo(false);
+    assert!(editor(&mut app, original).doc.is_empty());
+    assert!(!editor(&mut app, original).doc.is_modified());
+}
+
+#[test]
+fn review_invalid_preferences_are_not_overwritten_by_later_ui_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("preferences.conf");
+    let original = b"version=999\nprivate_future_setting=keep\n";
+    std::fs::write(&path, original).unwrap();
+    let (ctx, mut app) = setup();
+    app.install_settings(path.clone(), &ctx);
+    assert!(app.settings.is_none());
+    assert!(app.settings_notice.is_some());
+    assert_eq!(app.preferences, EditorPreferences::default());
+    app.preferences.theme = Theme::Light;
+    app.persist_settings(&ctx);
+    drop(app);
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn review_external_change_notice_never_reloads_clean_or_dirty_buffers() {
+    for dirty in [false, true] {
+        let (ctx, mut app) = setup();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observed.txt");
+        std::fs::write(&path, b"original").unwrap();
+        app.open_path(path.clone(), &ctx);
+        await_loads(&mut app, &ctx);
+        let owner = app.active;
+        if dirty {
+            editor(&mut app, owner).insert("local ");
+        }
+        let before = bytes(&mut app, owner);
+        let revision = editor(&mut app, owner).doc.revision();
+        let generation = editor(&mut app, owner).generation;
+        let expected = editor(&mut app, owner).stamp.clone();
+        std::fs::write(&path, b"changed on disk with a different length").unwrap();
+        app.start_disk_check(&ctx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.disk_check_pending {
+            app.poll(&ctx);
+            assert!(Instant::now() < deadline, "metadata check did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(editor(&mut app, owner).external_notice.is_some());
+        assert!(matches!(
+            editor(&mut app, owner).external_observed,
+            Some(ExternalState::Changed(_))
+        ));
+        assert_eq!(bytes(&mut app, owner), before);
+        assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+        assert_eq!(editor(&mut app, owner).generation, generation);
+        assert_eq!(editor(&mut app, owner).stamp, expected);
+        assert_eq!(editor(&mut app, owner).doc.is_modified(), dirty);
+        assert!(editor(&mut app, owner).pending.is_none());
+        assert!(editor(&mut app, owner).work.is_none());
+        if dirty {
+            editor(&mut app, owner).undo(false);
+            assert_eq!(bytes(&mut app, owner), b"original");
+            assert!(!editor(&mut app, owner).doc.is_modified());
+        }
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"changed on disk with a different length"
+        );
+    }
+}
+
+#[test]
+fn review_external_check_rejects_stale_job_generation_path_and_saved_stamp() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checked.txt");
+    let other_path = directory.path().join("different.txt");
+    std::fs::write(&path, b"original").unwrap();
+    std::fs::write(&other_path, b"unrelated different file").unwrap();
+    app.open_path(path.clone(), &ctx);
+    await_loads(&mut app, &ctx);
+    let owner = app.active;
+    editor(&mut app, owner).insert("dirty ");
+    let revision = editor(&mut app, owner).doc.revision();
+    let generation = editor(&mut app, owner).generation;
+    let stamp = editor(&mut app, owner).stamp.clone().unwrap();
+    let other_stamp = FileStamp::read(&other_path).unwrap();
+    for (job, check_generation, check_path, check_stamp) in [
+        (4, generation, path.clone(), stamp.clone()),
+        (5, generation + 1, path.clone(), stamp.clone()),
+        (5, generation, other_path.clone(), stamp.clone()),
+        (5, generation, path.clone(), other_stamp),
+    ] {
+        app.disk_check_pending = true;
+        app.disk_check_id = 5;
+        app.tx
+            .send(WorkspaceMessage::DiskChecked {
+                job,
+                results: vec![DiskCheck {
+                    id: owner,
+                    generation: check_generation,
+                    path: check_path,
+                    expected: check_stamp,
+                    observed: ExternalState::Missing,
+                }],
+            })
+            .unwrap();
+        app.poll(&ctx);
+        assert!(editor(&mut app, owner).external_notice.is_none());
+        assert!(editor(&mut app, owner).external_observed.is_none());
+        assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+        assert_eq!(bytes(&mut app, owner), b"dirty original");
+        if job == 4 {
+            assert!(
+                app.disk_check_pending,
+                "Obsolete completion cannot finish a newer job"
+            );
+        }
+    }
+    app.disk_check_pending = true;
+    app.disk_check_id = 6;
+    app.tx
+        .send(WorkspaceMessage::DiskChecked {
+            job: 6,
+            results: vec![DiskCheck {
+                id: owner,
+                generation,
+                path: path.clone(),
+                expected: stamp,
+                observed: ExternalState::Missing,
+            }],
+        })
+        .unwrap();
+    app.poll(&ctx);
+    assert!(editor(&mut app, owner).external_notice.is_some());
+    assert!(matches!(
+        editor(&mut app, owner).external_observed,
+        Some(ExternalState::Missing)
+    ));
+    assert_eq!(bytes(&mut app, owner), b"dirty original");
+    assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+    editor(&mut app, owner).undo(false);
+    assert_eq!(bytes(&mut app, owner), b"original");
+}
+
+#[test]
+fn review_reload_toolbar_requires_dirty_confirmation_before_loading_disk() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reload-button.txt");
+    std::fs::write(&path, b"original").unwrap();
+    app.open_path(path.clone(), &ctx);
+    await_loads(&mut app, &ctx);
+    let owner = app.active;
+    editor(&mut app, owner).insert("dirty ");
+    let revision = editor(&mut app, owner).doc.revision();
+    std::fs::write(&path, b"external version").unwrap();
+    let output = render_frame(&ctx, &mut app, Vec::new());
+    let button = painted_text(&output)
+        .into_iter()
+        .find(|(text, _)| text == "Reload")
+        .expect("Reload is a visible toolbar control")
+        .1
+        .center();
+    for pressed in [true, false] {
+        render_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(button),
+                egui::Event::PointerButton {
+                    pos: button,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    assert!(matches!(
+        editor(&mut app, owner).pending,
+        Some(Pending::Reload)
+    ));
+    assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+    assert_eq!(bytes(&mut app, owner), b"dirty original");
+    assert!(editor(&mut app, owner).work.is_none());
+    editor(&mut app, owner).pending = None;
+    editor(&mut app, owner).undo(false);
+    assert_eq!(bytes(&mut app, owner), b"original");
+    assert_eq!(std::fs::read(path).unwrap(), b"external version");
+}
+
+#[test]
+fn review_failed_reload_preserves_dirty_buffer_view_stamp_and_undo() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("invalid-reload.txt");
+    let original = "original α\r\nline";
+    std::fs::write(&path, original).unwrap();
+    app.open_path(path.clone(), &ctx);
+    await_loads(&mut app, &ctx);
+    let owner = app.active;
+    let active = editor(&mut app, owner);
+    active.move_to(4, false);
+    active.insert("dirty ");
+    active.anchor = Some(1);
+    active.top_line = 1;
+    active.horizontal = 2;
+    let before = active.doc.read(0..active.doc.len());
+    let revision = active.doc.revision();
+    let cursor = active.cursor;
+    let anchor = active.anchor;
+    let stamp = active.stamp.clone();
+    let invalid = [0xff, b'b', b'a', b'd'];
+    std::fs::write(&path, invalid).unwrap();
+    active.request(Pending::Reload, &ctx);
+    assert!(matches!(active.pending, Some(Pending::Reload)));
+    active.perform(Pending::Reload, &ctx);
+    app.process_actions(&ctx);
+    assert_eq!(bytes(&mut app, owner), before);
+    assert!(!editor(&mut app, owner).ready);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while editor(&mut app, owner).work.is_some() {
+        app.poll(&ctx);
+        assert!(Instant::now() < deadline, "invalid reload did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let active = editor(&mut app, owner);
+    assert!(active.ready);
+    assert!(active.error.is_some());
+    assert_eq!(active.doc.read(0..active.doc.len()), before);
+    assert_eq!(active.doc.revision(), revision);
+    assert_eq!(active.cursor, cursor);
+    assert_eq!(active.anchor, anchor);
+    assert_eq!(active.top_line, 1);
+    assert_eq!(active.horizontal, 2);
+    assert_eq!(active.path.as_ref(), Some(&path));
+    assert_eq!(active.stamp, stamp);
+    assert!(active.doc.is_modified());
+    active.undo(false);
+    assert_eq!(active.doc.read(0..active.doc.len()), original.as_bytes());
+    assert!(!active.doc.is_modified());
+    assert_eq!(std::fs::read(path).unwrap(), invalid);
+}
+
+#[test]
+fn review_cancelled_reload_restores_editability_and_keeps_original_undo() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cancel-reload.txt");
+    std::fs::write(&path, b"original").unwrap();
+    let owner = app.active;
+    seed(&mut app, owner, "original");
+    let active = editor(&mut app, owner);
+    active.path = Some(path.clone());
+    active.stamp = Some(FileStamp::read(&path).unwrap());
+    active.insert("dirty ");
+    active.anchor = Some(2);
+    let revision = active.doc.revision();
+    let cursor = active.cursor;
+    let stamp = active.stamp.clone();
+    // Complete the same channel as the cancelled worker, without a scheduling
+    // race between cancelling a small load and its successful publication.
+    active.reloading = true;
+    active.ready = false;
+    active.work = Some(work("Opening"));
+    active
+        .work
+        .as_ref()
+        .unwrap()
+        .cancel
+        .store(true, Ordering::Relaxed);
+    active
+        .tx
+        .send(Message::Loaded(
+            active.generation,
+            Err("Operation cancelled".into()),
+        ))
+        .unwrap();
+    app.poll(&ctx);
+    let active = editor(&mut app, owner);
+    assert!(active.ready);
+    assert!(!active.reloading);
+    assert!(active.work.is_none());
+    assert!(active.error.as_ref().unwrap().contains("cancelled"));
+    assert_eq!(active.doc.read(0..active.doc.len()), b"dirty original");
+    assert_eq!(active.doc.revision(), revision);
+    assert_eq!(active.cursor, cursor);
+    assert_eq!(active.anchor, Some(2));
+    assert_eq!(active.stamp, stamp);
+    active.undo(false);
+    assert_eq!(active.doc.read(0..active.doc.len()), b"original");
+    assert!(!active.doc.is_modified());
+    assert_eq!(std::fs::read(path).unwrap(), b"original");
+}
+
+#[test]
+fn review_successful_reload_publishes_only_the_loaded_disk_snapshot() {
+    let (ctx, mut app) = setup();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("successful-reload.txt");
+    std::fs::write(&path, b"original").unwrap();
+    app.open_path(path.clone(), &ctx);
+    await_loads(&mut app, &ctx);
+    let owner = app.active;
+    editor(&mut app, owner).insert("dirty ");
+    let revision = editor(&mut app, owner).doc.revision();
+    let other = app.new_tab(&ctx);
+    editor(&mut app, other).insert("other unsaved buffer");
+    let replacement = "\u{feff}disk α\r\n";
+    std::fs::write(&path, replacement).unwrap();
+    editor(&mut app, owner).perform(Pending::Reload, &ctx);
+    app.process_actions(&ctx);
+    assert_eq!(bytes(&mut app, owner), b"dirty original");
+    assert_eq!(editor(&mut app, owner).doc.revision(), revision);
+    assert!(!editor(&mut app, owner).ready);
+    await_loads(&mut app, &ctx);
+    let active = editor(&mut app, owner);
+    assert_eq!(active.doc.read(0..active.doc.len()), replacement.as_bytes());
+    assert!(active.ready);
+    assert!(!active.reloading);
+    assert!(!active.doc.is_modified());
+    assert!(active.error.is_none());
+    assert_eq!(active.path.as_ref(), Some(&path));
+    assert_eq!(
+        active.stamp.as_ref(),
+        Some(&FileStamp::read(&path).unwrap())
+    );
+    assert_eq!(active.cursor, 3);
+    active.undo(false);
+    assert_eq!(active.doc.read(0..active.doc.len()), replacement.as_bytes());
+    assert_eq!(bytes(&mut app, other), b"other unsaved buffer");
+    assert!(editor(&mut app, other).doc.is_modified());
+}
+
+#[test]
+fn review_vim_refusal_remains_nonmodal_and_keeps_visual_selection_across_frames() {
+    use simptxt::vim::{Mode, Register};
+    for command in ["d", "c"] {
+        let (ctx, mut app) = setup();
+        let owner = app.active;
+        let original = "a".repeat(512 * 1024);
+        seed(&mut app, owner, &original);
+        let active = editor(&mut app, owner);
+        active.doc.set_history_byte_limit(64 * 1024);
+        active.insert("prior ");
+        let before = active.doc.read(0..active.doc.len());
+        let revision = active.doc.revision();
+        let history_bytes = active.doc.history_bytes();
+        enable_vim(&mut app);
+        let active = editor(&mut app, owner);
+        active.vim.set_mode(Mode::Visual);
+        active.anchor = Some(0);
+        active.cursor = active.doc.len() - 1;
+        let cursor = active.cursor;
+        active.vim_register = Register {
+            text: "old register".into(),
+            linewise: false,
+        };
+        render_frame(&ctx, &mut app, vec![egui::Event::Text(command.into())]);
+        // An error dialog is discovered by WorkspaceApp on the following
+        // frame. That path cancels Visual mode even if dispatch restored it.
+        render_frame(&ctx, &mut app, Vec::new());
+        assert!(
+            !app.modal_open(),
+            "Refusal must not open a destructive modal"
+        );
+        let active = editor(&mut app, owner);
+        assert!(active.error.is_none());
+        assert!(active.status.contains("undo/redo budget"));
+        assert_eq!(active.doc.read(0..active.doc.len()), before);
+        assert_eq!(active.doc.revision(), revision);
+        assert_eq!(active.doc.history_bytes(), history_bytes);
+        assert_eq!(active.vim.mode(), Mode::Visual);
+        assert_eq!(active.cursor, cursor);
+        assert_eq!(active.anchor, Some(0));
+        assert_eq!(active.vim_register.text, "old register");
+        assert!(active.editor_focus);
+        render_frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+        render_frame(&ctx, &mut app, vec![egui::Event::Text("u".into())]);
+        assert_eq!(bytes(&mut app, owner), original.as_bytes());
+        assert!(!editor(&mut app, owner).doc.is_modified());
+    }
 }

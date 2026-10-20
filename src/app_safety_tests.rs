@@ -450,3 +450,426 @@ fn undo_cursor_does_not_split_crlf_before_delete() {
     assert_eq!(contents(&app), b"a\r\nb");
     assert!(!app.doc.is_modified());
 }
+
+#[test]
+fn review_shift_tab_outdents_selected_lines_without_replacing_them() {
+    for reverse_selection in [false, true] {
+        let original = "  abc\r\n  def";
+        let (ctx, mut app) = editor_with_text(original);
+        let (anchor, cursor) = if reverse_selection {
+            (app.doc.len(), 0)
+        } else {
+            (0, app.doc.len())
+        };
+        app.anchor = Some(anchor);
+        app.cursor = cursor;
+        let mut event = pressed(Key::Tab);
+        if let egui::Event::Key { modifiers, .. } = &mut event {
+            modifiers.shift = true;
+        }
+        app.event(event, &ctx);
+        assert_eq!(
+            contents(&app),
+            b"abc\r\ndef",
+            "Shift-Tab must outdent, not replace selected lines with a tab"
+        );
+        assert!(!app.selection().is_empty());
+        app.undo(false);
+        assert_eq!(contents(&app), original.as_bytes());
+        assert_eq!(app.anchor, Some(anchor));
+        assert_eq!(app.cursor, cursor);
+        assert!(!app.doc.is_modified());
+        app.undo(true);
+        assert_eq!(contents(&app), b"abc\r\ndef");
+        assert!(!app.selection().is_empty());
+    }
+}
+
+#[test]
+fn review_ime_surrounding_counts_crlf_as_two_unicode_scalars() {
+    for (text, cursor, before_chars, after_chars, expected) in [
+        ("a\r\nb", 3, 2, 0, "ab"),
+        ("a\r\nb", 1, 0, 2, "ab"),
+        ("é\r\n💚", 4, 2, 1, "é"),
+        ("é\r\n💚", 2, 1, 2, "💚"),
+        ("\u{feff}é\r\n💚", 7, 3, 0, "\u{feff}💚"),
+    ] {
+        let (ctx, mut app) = editor_with_text(text);
+        app.cursor = cursor;
+        app.event(
+            egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
+                before_chars,
+                after_chars,
+            }),
+            &ctx,
+        );
+        assert_eq!(
+            contents(&app),
+            expected.as_bytes(),
+            "IME deletion must count individual Unicode scalars in {text:?}"
+        );
+        assert!(app.doc.char_boundary(app.cursor));
+        app.undo(false);
+        assert_eq!(contents(&app), text.as_bytes());
+        assert_eq!(app.cursor, cursor);
+        assert!(!app.doc.is_modified());
+    }
+}
+
+#[test]
+fn review_vertical_navigation_uses_unicode_not_byte_columns() {
+    for (text, start, down) in [
+        ("éab\nxyz", 2, 6),
+        ("💚ab\nαβγ", 4, 9),
+        ("\u{feff}éab\r\nxyz", 5, 10),
+    ] {
+        let (ctx, mut app) = editor_with_text(text);
+        app.cursor = start;
+        app.event(pressed(Key::ArrowDown), &ctx);
+        assert_eq!(app.cursor, down, "wrong character column in {text:?}");
+        app.event(pressed(Key::ArrowUp), &ctx);
+        assert_eq!(app.cursor, start);
+    }
+}
+
+#[test]
+fn review_vertical_navigation_retains_preferred_column_through_short_lines() {
+    let (ctx, mut app) = editor_with_text("éabc\nx\n💚xyz");
+    app.cursor = "éab".len();
+    app.event(pressed(Key::ArrowDown), &ctx);
+    assert_eq!(app.cursor, "éabc\nx".len());
+    app.event(pressed(Key::ArrowDown), &ctx);
+    assert_eq!(
+        app.cursor,
+        "éabc\nx\n💚xy".len(),
+        "A short line must not erase the preferred Unicode column"
+    );
+    app.event(pressed(Key::ArrowUp), &ctx);
+    app.event(pressed(Key::ArrowUp), &ctx);
+    assert_eq!(app.cursor, "éab".len());
+    app.event(pressed(Key::ArrowRight), &ctx);
+    app.event(pressed(Key::ArrowDown), &ctx);
+    app.event(pressed(Key::ArrowDown), &ctx);
+    assert_eq!(
+        app.cursor,
+        app.doc.len(),
+        "Horizontal movement resets the goal"
+    );
+}
+
+#[test]
+fn review_indent_excludes_unselected_trailing_line_and_preserves_bom_crlf() {
+    let original = "\u{feff}one\r\ntwo\r\nthree";
+    let (ctx, mut app) = editor_with_text(original);
+    let start = view::content_start(&app.doc);
+    let end = "\u{feff}one\r\ntwo\r\n".len();
+    app.anchor = Some(start);
+    app.cursor = end;
+    app.event(pressed(Key::Tab), &ctx);
+    assert_eq!(contents(&app), "\u{feff}\tone\r\n\ttwo\r\nthree".as_bytes());
+    assert_eq!(app.selection(), start + 1..end + 2);
+    app.undo(false);
+    assert_eq!(contents(&app), original.as_bytes());
+    assert_eq!(app.anchor, Some(start));
+    assert_eq!(app.cursor, end);
+    assert!(!app.doc.is_modified());
+}
+
+#[test]
+fn review_enter_copies_leading_indent_without_normalizing_line_endings() {
+    let (ctx, mut app) = editor_with_text("\u{feff} \talpha\r\nbeta\n");
+    app.cursor = "\u{feff} \talpha".len();
+    app.event(pressed(Key::Enter), &ctx);
+    assert_eq!(
+        contents(&app),
+        "\u{feff} \talpha\r\n \t\r\nbeta\n".as_bytes()
+    );
+    assert_eq!(app.cursor, "\u{feff} \talpha\r\n \t".len());
+    app.undo(false);
+    assert_eq!(contents(&app), "\u{feff} \talpha\r\nbeta\n".as_bytes());
+    assert_eq!(app.cursor, "\u{feff} \talpha".len());
+    assert!(!app.doc.is_modified());
+}
+
+#[test]
+fn review_undo_restores_original_selection_direction_and_redo_caret() {
+    for reversed in [false, true] {
+        let original = "aé💚z";
+        let (ctx, mut app) = editor_with_text(original);
+        let (anchor, cursor) = if reversed { (7, 1) } else { (1, 7) };
+        app.anchor = Some(anchor);
+        app.cursor = cursor;
+        app.event(egui::Event::Text("x".into()), &ctx);
+        assert_eq!(contents(&app), b"axz");
+        assert_eq!(app.cursor, 2);
+        assert!(app.anchor.is_none());
+        app.undo(false);
+        assert_eq!(contents(&app), original.as_bytes());
+        assert_eq!(app.cursor, cursor);
+        assert_eq!(app.anchor, Some(anchor));
+        assert!(!app.doc.is_modified());
+        app.undo(true);
+        assert_eq!(contents(&app), b"axz");
+        assert_eq!(app.cursor, 2);
+        assert!(app.anchor.is_none());
+    }
+}
+
+#[test]
+fn review_typing_groups_stop_at_motion_paste_and_undo() {
+    let (ctx, mut app) = editor_with_text("");
+    for text in ["a", "é", "💚"] {
+        app.event(egui::Event::Text(text.into()), &ctx);
+    }
+    app.event(pressed(Key::ArrowLeft), &ctx);
+    app.event(egui::Event::Text("x".into()), &ctx);
+    app.event(egui::Event::Paste("yz".into()), &ctx);
+    assert_eq!(contents(&app), "aéxyz💚".as_bytes());
+    app.undo(false);
+    assert_eq!(
+        contents(&app),
+        "aéx💚".as_bytes(),
+        "Paste is its own undo action"
+    );
+    app.undo(false);
+    assert_eq!(
+        contents(&app),
+        "aé💚".as_bytes(),
+        "Motion breaks a typing group"
+    );
+    assert_eq!(app.cursor, "aé".len());
+    app.undo(false);
+    assert!(
+        app.doc.is_empty(),
+        "Adjacent native text events form one action"
+    );
+    assert_eq!(app.cursor, 0);
+    assert!(!app.doc.is_modified());
+    app.event(egui::Event::Text("new".into()), &ctx);
+    app.undo(true);
+    assert_eq!(contents(&app), b"new", "A branch edit must discard redo");
+}
+
+#[test]
+fn review_word_navigation_and_deletion_respect_unicode_bom_and_crlf() {
+    let original = "\u{feff}éclair  beta\r\nγ";
+    let (ctx, mut app) = editor_with_text(original);
+    app.cursor = view::content_start(&app.doc);
+    let word_key = |key| {
+        let mut event = pressed(key);
+        if let egui::Event::Key { modifiers, .. } = &mut event {
+            modifiers.ctrl = true;
+        }
+        event
+    };
+    app.event(word_key(Key::ArrowRight), &ctx);
+    assert_eq!(app.cursor, "\u{feff}éclair  ".len());
+    app.event(word_key(Key::Delete), &ctx);
+    assert_eq!(contents(&app), "\u{feff}éclair  γ".as_bytes());
+    app.undo(false);
+    assert_eq!(contents(&app), original.as_bytes());
+    assert_eq!(app.cursor, "\u{feff}éclair  ".len());
+    app.event(word_key(Key::Backspace), &ctx);
+    assert_eq!(contents(&app), "\u{feff}beta\r\nγ".as_bytes());
+    assert_eq!(app.cursor, 3);
+    app.undo(false);
+    assert_eq!(contents(&app), original.as_bytes());
+    app.event(word_key(Key::ArrowLeft), &ctx);
+    assert_eq!(app.cursor, 3);
+    app.event(word_key(Key::Backspace), &ctx);
+    assert_eq!(
+        contents(&app),
+        original.as_bytes(),
+        "Word deletion cannot remove BOM"
+    );
+}
+
+#[test]
+fn review_oversized_edit_refuses_atomically_and_preserves_selection_and_prior_undo() {
+    let original = "a".repeat(512 * 1024);
+    let (ctx, mut app) = editor_with_text(&original);
+    app.doc.set_history_byte_limit(64 * 1024);
+    app.insert(" prior");
+    assert!(app.error.is_none());
+    let before = contents(&app);
+    let revision = app.doc.revision();
+    let history_bytes = app.doc.history_bytes();
+    let evictions = app.doc.history_evictions();
+    let change = app.doc.last_change();
+    app.anchor = Some(0);
+    app.cursor = app.doc.len();
+    let cursor = app.cursor;
+    app.event(pressed(Key::Backspace), &ctx);
+    assert!(
+        app.error.is_some(),
+        "Refused undo capacity must be explained"
+    );
+    assert_eq!(contents(&app), before);
+    assert_eq!(app.doc.revision(), revision);
+    assert_eq!(app.doc.history_bytes(), history_bytes);
+    assert_eq!(app.doc.history_evictions(), evictions);
+    assert_eq!(app.doc.last_change(), change);
+    assert_eq!(app.cursor, cursor);
+    assert_eq!(app.anchor, Some(0));
+    assert!(app.doc.is_modified());
+    app.error = None;
+    app.undo(false);
+    assert_eq!(contents(&app), original.as_bytes());
+    assert_eq!(app.cursor, original.len());
+    assert!(!app.doc.is_modified());
+    app.undo(true);
+    assert_eq!(contents(&app), before);
+    assert_eq!(app.doc.revision(), revision);
+}
+
+#[test]
+fn review_oversized_replace_all_preserves_document_selection_revision_and_history() {
+    let original = "a".repeat(512 * 1024);
+    let (ctx, mut app) = editor_with_text(&original);
+    app.doc.set_history_byte_limit(64 * 1024);
+    app.insert(" prior");
+    let before = contents(&app);
+    let revision = app.doc.revision();
+    let history_bytes = app.doc.history_bytes();
+    let evictions = app.doc.history_evictions();
+    let change = app.doc.last_change();
+    app.cursor = 1;
+    app.anchor = Some(9);
+    app.search_work = Some(search_job(1));
+    app.tx
+        .send(Message::Replaced(
+            app.generation,
+            1,
+            revision,
+            Ok((Document::from_bytes(b"replacement".to_vec()).unwrap(), 1)),
+        ))
+        .unwrap();
+    app.poll(&ctx);
+    assert!(app.search_work.is_none());
+    assert!(
+        app.error.is_some(),
+        "Replace-all admission refusal must be explained"
+    );
+    assert_eq!(contents(&app), before);
+    assert_eq!(app.doc.revision(), revision);
+    assert_eq!(app.doc.history_bytes(), history_bytes);
+    assert_eq!(app.doc.history_evictions(), evictions);
+    assert_eq!(app.doc.last_change(), change);
+    assert_eq!(app.cursor, 1);
+    assert_eq!(app.anchor, Some(9));
+    assert!(app.doc.is_modified());
+    assert!(!app.status.contains("one undo action"));
+    app.error = None;
+    app.undo(false);
+    assert_eq!(contents(&app), original.as_bytes());
+    assert!(!app.doc.is_modified());
+    app.undo(true);
+    assert_eq!(contents(&app), before);
+    assert_eq!(app.doc.revision(), revision);
+}
+
+#[test]
+fn review_rejected_edit_does_not_discard_an_existing_redo_branch() {
+    let original = "a".repeat(512 * 1024);
+    let (ctx, mut app) = editor_with_text(&original);
+    app.doc.set_history_byte_limit(64 * 1024);
+    app.insert(" first");
+    app.insert(" second");
+    let expected_redo = contents(&app);
+    let expected_revision = app.doc.revision();
+    app.undo(false);
+    let before = contents(&app);
+    let before_revision = app.doc.revision();
+    app.anchor = Some(0);
+    app.cursor = app.doc.len();
+    app.event(pressed(Key::Delete), &ctx);
+    assert!(app.error.is_some());
+    assert_eq!(contents(&app), before);
+    assert_eq!(app.doc.revision(), before_revision);
+    assert_eq!(app.selection(), 0..before.len());
+    app.error = None;
+    app.undo(true);
+    assert_eq!(contents(&app), expected_redo);
+    assert_eq!(app.doc.revision(), expected_revision);
+    assert_eq!(app.cursor, expected_redo.len());
+    assert!(app.anchor.is_none());
+}
+
+#[test]
+fn review_replace_all_worker_refusal_preserves_state_and_finishes_status() {
+    let (ctx, mut app) = editor_with_text("original");
+    app.insert(" prior");
+    let before = contents(&app);
+    let revision = app.doc.revision();
+    let history_bytes = app.doc.history_bytes();
+    app.cursor = 2;
+    app.anchor = Some(7);
+    app.status = "Preparing replace all".into();
+    app.search_work = Some(search_job(1));
+    app.tx
+        .send(Message::Replaced(
+            app.generation,
+            1,
+            revision,
+            Err("The replacement exceeds the undo/redo budget".into()),
+        ))
+        .unwrap();
+    app.poll(&ctx);
+    assert!(app.search_work.is_none());
+    assert_eq!(contents(&app), before);
+    assert_eq!(app.doc.revision(), revision);
+    assert_eq!(app.doc.history_bytes(), history_bytes);
+    assert_eq!(app.cursor, 2);
+    assert_eq!(app.anchor, Some(7));
+    assert!(app.error.as_ref().unwrap().contains("undo/redo budget"));
+    assert!(app.status.contains("Replace all was not applied"));
+    assert!(app.status.contains("unchanged"));
+    app.error = None;
+    app.undo(false);
+    assert_eq!(contents(&app), b"original");
+    assert!(!app.doc.is_modified());
+}
+
+#[test]
+fn review_vim_visual_refused_delete_and_change_preserve_mode_selection_and_register() {
+    use simptxt::vim::{Mode, Register};
+    for command in ["d", "c"] {
+        let original = "a".repeat(512 * 1024);
+        let (ctx, mut app) = editor_with_text(&original);
+        app.doc.set_history_byte_limit(64 * 1024);
+        app.insert(" prior");
+        let before = contents(&app);
+        let revision = app.doc.revision();
+        let history_bytes = app.doc.history_bytes();
+        let change = app.doc.last_change();
+        app.vim_enabled = true;
+        app.vim.set_mode(Mode::Visual);
+        app.anchor = Some(0);
+        app.cursor = app.doc.len() - 1;
+        let cursor = app.cursor;
+        app.vim_register = Register {
+            text: "previous register".into(),
+            linewise: true,
+        };
+        app.event(egui::Event::Text(command.into()), &ctx);
+        assert_eq!(contents(&app), before, "Vim command {command}");
+        assert_eq!(app.doc.revision(), revision);
+        assert_eq!(app.doc.history_bytes(), history_bytes);
+        assert_eq!(app.doc.last_change(), change);
+        assert_eq!(app.cursor, cursor);
+        assert_eq!(app.anchor, Some(0));
+        assert_eq!(app.vim.mode(), Mode::Visual);
+        assert_eq!(app.vim_register.text, "previous register");
+        assert!(app.vim_register.linewise);
+        assert!(
+            app.error
+                .as_deref()
+                .unwrap_or(&app.status)
+                .contains("undo/redo budget")
+        );
+        app.error = None;
+        app.undo(false);
+        assert_eq!(contents(&app), original.as_bytes());
+        assert!(!app.doc.is_modified());
+    }
+}

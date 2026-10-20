@@ -1,5 +1,9 @@
 use crate::{preferences::EditorPreferences, view};
 
+#[path = "app_input.rs"]
+mod app_input;
+use app_input::{CursorHistory, TypingGroup};
+
 #[path = "workspace.rs"]
 mod workspace;
 use workspace::WorkspaceAction;
@@ -12,18 +16,26 @@ use simptxt::{
     document::Document,
     file_io::{self, FileStamp, LoadedFile, OpenError},
     search,
-    syntax::{HighlightIndex, Language, TokenKind},
+    syntax::{HighlightIndex, HighlightSpan, Language, TokenKind, ViewportCache},
 };
 use std::{
     ops::Range,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     time::{Duration, Instant},
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExternalState {
+    Current,
+    Changed(FileStamp),
+    Missing,
+    Unavailable(String),
+}
 
 enum Message {
     OpenDialog(Option<PathBuf>),
@@ -34,6 +46,30 @@ enum Message {
     Replaced(u64, u64, u64, Result<(Document, usize), String>),
     Highlighted(u64, u64, u64, bool, Result<HighlightIndex, String>),
 }
+const HIGHLIGHT_PROGRESS_BYTES: usize = 8 * 1024 * 1024;
+
+fn initial_highlight_through(
+    document_len: usize,
+    visible_end: usize,
+    previous_until: usize,
+    has_complete_base: bool,
+) -> usize {
+    let desired = visible_end.max(128 * 1024).min(document_len);
+    if has_complete_base {
+        return desired;
+    }
+    desired
+        .max(previous_until.min(document_len))
+        .min(previous_until.saturating_add(HIGHLIGHT_PROGRESS_BYTES))
+}
+
+struct HighlightProgress {
+    generation: u64,
+    revision: u64,
+    id: u64,
+    index: HighlightIndex,
+}
+
 #[derive(Clone)]
 enum Pending {
     New,
@@ -69,9 +105,13 @@ pub struct EditorApp {
     stamp: Option<FileStamp>,
     cursor: usize,
     anchor: Option<usize>,
+    preferred_column: Option<usize>,
+    cursor_history: CursorHistory,
+    typing_group: Option<TypingGroup>,
     top_line: usize,
     horizontal: usize,
     ready: bool,
+    reloading: bool,
     generation: u64,
     next_search_id: u64,
     work: Option<Work>,
@@ -80,13 +120,18 @@ pub struct EditorApp {
     rx: Receiver<Message>,
     language: Language,
     highlight: Option<HighlightIndex>,
+    highlight_base: Option<HighlightIndex>,
+    viewport_highlight: ViewportCache,
     highlight_cancel: Option<Arc<AtomicBool>>,
+    highlight_progress: Option<Arc<Mutex<Option<HighlightProgress>>>>,
     highlight_revision: Option<u64>,
     highlight_id: u64,
     last_edit: Instant,
     status: String,
     error: Option<String>,
     open_error_kind: Option<std::io::ErrorKind>,
+    external_observed: Option<ExternalState>,
+    external_notice: Option<String>,
     pending: Option<Pending>,
     continue_after_save: bool,
     overwrite: Option<PathBuf>,
@@ -129,9 +174,13 @@ impl EditorApp {
             stamp: None,
             cursor: 0,
             anchor: None,
+            preferred_column: None,
+            cursor_history: CursorHistory::default(),
+            typing_group: None,
             top_line: 0,
             horizontal: 0,
             ready: true,
+            reloading: false,
             generation: 0,
             next_search_id: 0,
             work: None,
@@ -140,13 +189,18 @@ impl EditorApp {
             rx,
             language: Language::Plain,
             highlight: None,
+            highlight_base: None,
+            viewport_highlight: ViewportCache::default(),
             highlight_cancel: None,
+            highlight_progress: None,
             highlight_revision: None,
             highlight_id: 0,
             last_edit: Instant::now(),
             status: "Ready".into(),
             error: None,
             open_error_kind: None,
+            external_observed: None,
+            external_notice: None,
             pending: None,
             continue_after_save: false,
             overwrite: None,
@@ -193,6 +247,9 @@ impl EditorApp {
         }
     }
     fn reset_view(&mut self) {
+        self.preferred_column = None;
+        self.cursor_history = CursorHistory::default();
+        self.break_typing_group();
         self.cursor = view::content_start(&self.doc);
         self.anchor = None;
         self.top_line = 0;
@@ -200,22 +257,33 @@ impl EditorApp {
         self.editor_focus = true;
     }
     fn cancel_highlight(&mut self) {
-        self.highlight_id += 1;
-        if let Some(cancel) = self.highlight_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
+        self.pause_highlight();
         self.highlight = None;
-        self.highlight_revision = None;
+        self.highlight_base = None;
+        self.viewport_highlight.clear();
     }
     fn pause_highlight(&mut self) {
         if let Some(cancel) = self.highlight_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
-            self.highlight_id += 1;
-            self.highlight_revision = None;
         }
+        // A per-job latest-value slot retains at most one progress index. Drain
+        // its last completed prefix for reuse even if an edit happened before
+        // the next UI poll. Old workers can only write to their detached slot.
+        if let Some(slot) = self.highlight_progress.take()
+            && let Some(progress) = slot.lock().unwrap().take()
+            && progress.generation == self.generation
+            && progress.id == self.highlight_id
+            && self.highlight_revision == Some(progress.revision)
+            && self.highlight_base.is_none()
+        {
+            self.highlight = Some(progress.index);
+        }
+        self.highlight_id += 1;
+        self.highlight_revision = None;
     }
     fn changed(&mut self) {
-        self.cancel_highlight();
+        self.preferred_column = None;
+        self.pause_highlight();
         self.last_edit = Instant::now();
         self.cursor = self.cursor.min(self.doc.len());
         while self.cursor > 0 && !self.doc.char_boundary(self.cursor) {
@@ -234,54 +302,15 @@ impl EditorApp {
             "No unsaved changes"
         }
         .into();
+        if self.doc.history_evictions() > 0 {
+            self.status
+                .push_str(" · Undo history was trimmed to stay within history limits");
+        }
         self.ensure_visible();
     }
-    fn insert(&mut self, text: &str) {
-        if !self.ready || (text.is_empty() && self.selection().is_empty()) {
-            return;
-        }
-        if text.contains('\0') {
-            self.error = Some(
-                "NUL bytes are not supported in editable UTF-8 text. The document was not changed."
-                    .into(),
-            );
-            return;
-        }
-        if text.len() > view::CLIPBOARD_LIMIT {
-            self.error = Some("One insertion exceeds the 16 MiB safety limit. Paste smaller regions; the document was not changed.".into());
-            return;
-        }
-        let range = self.selection();
-        let next = range.start.saturating_add(text.len());
-        match self.doc.replace(range, text) {
-            Ok(()) => {
-                self.cursor = next;
-                self.anchor = None;
-                self.changed();
-            }
-            Err(e) => self.error = Some(e),
-        }
-    }
-    fn delete_selection(&mut self) -> bool {
-        let range = self.selection();
-        if range.is_empty() || !self.ready {
-            return false;
-        }
-        let pos = range.start;
-        match self.doc.replace(range, "") {
-            Ok(()) => {
-                self.cursor = pos;
-                self.anchor = None;
-                self.changed();
-                true
-            }
-            Err(e) => {
-                self.error = Some(e);
-                false
-            }
-        }
-    }
     fn move_to(&mut self, mut offset: usize, select: bool) {
+        self.break_typing_group();
+        self.preferred_column = None;
         offset = offset.clamp(view::content_start(&self.doc), self.doc.len());
         while offset > 0 && !self.doc.char_boundary(offset) {
             offset -= 1;
@@ -319,8 +348,11 @@ impl EditorApp {
         }
     }
     fn newline(&self) -> &'static str {
+        self.newline_at(self.cursor)
+    }
+    fn newline_at(&self, offset: usize) -> &'static str {
         // Match the current line first; no unrelated line ending is ever rewritten.
-        let line = self.doc.line_of_offset(self.cursor);
+        let line = self.doc.line_of_offset(offset);
         if line + 1 < self.doc.line_count() {
             let end = self.doc.line_start(line + 1);
             if end >= 2 && self.doc.read(end - 2..end) == b"\r\n" {
@@ -338,6 +370,7 @@ impl EditorApp {
         if cfg!(windows) { "\r\n" } else { "\n" }
     }
     fn copy(&mut self, ctx: &egui::Context, cut: bool) {
+        self.break_typing_group();
         let r = self.selection();
         if r.is_empty() {
             return;
@@ -424,7 +457,7 @@ impl EditorApp {
                         self.workspace_actions
                             .push(WorkspaceAction::ReloadPath(path));
                     } else {
-                        self.open_path(path, ctx);
+                        self.reload_path(path, ctx);
                     }
                 }
             }
@@ -437,6 +470,7 @@ impl EditorApp {
         }
     }
     fn open_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.reloading = false;
         self.open_error_kind = None;
         self.cancel_highlight();
         self.cancel_search();
@@ -458,6 +492,36 @@ impl EditorApp {
         };
         self.reset_view();
         self.status = "Read-only preview · validating UTF-8 and building the line index…".into();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU64::new(0));
+        let total = std::fs::metadata(&path).map_or(0, |m| m.len() as usize);
+        self.work = Some(Work {
+            label: "Opening",
+            cancel: cancel.clone(),
+            progress: progress.clone(),
+            total,
+        });
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = file_io::load_for_open(&path, &cancel, &progress);
+            let _ = tx.send(Message::Loaded(generation, result));
+            ctx.request_repaint();
+        });
+    }
+    fn reload_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.work.is_some() || !self.ready {
+            return;
+        }
+        self.break_typing_group();
+        self.cancel_highlight();
+        self.cancel_search();
+        self.generation += 1;
+        let generation = self.generation;
+        self.reloading = true;
+        self.ready = false;
+        self.open_error_kind = None;
+        self.status = "Reloading · existing buffer retained until validation succeeds…".into();
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
         let total = std::fs::metadata(&path).map_or(0, |m| m.len() as usize);
@@ -532,6 +596,7 @@ impl EditorApp {
         }
     }
     fn start_save(&mut self, path: PathBuf, expected: Option<FileStamp>, ctx: &egui::Context) {
+        self.break_typing_group();
         if self.work.is_some() || !self.ready {
             return;
         }
@@ -607,21 +672,8 @@ impl EditorApp {
                     search::replace_all(&doc, &needle, &replacement, &cancel, &progress),
                 )
             } else {
-                let result = search::search(&doc, &needle, start, backwards, &cancel, &progress)
-                    .and_then(|found| {
-                        if found.is_some() {
-                            Ok(found)
-                        } else {
-                            search::search(
-                                &doc,
-                                &needle,
-                                if backwards { doc.len() } else { 0 },
-                                backwards,
-                                &cancel,
-                                &progress,
-                            )
-                        }
-                    });
+                let result =
+                    search::search_wrapping(&doc, &needle, start, backwards, &cancel, &progress);
                 Message::Found(generation, job_id, rev, result)
             };
             let _ = tx.send(message);
@@ -629,6 +681,18 @@ impl EditorApp {
         });
     }
     fn poll(&mut self, ctx: &egui::Context) {
+        let progress = self
+            .highlight_progress
+            .as_ref()
+            .and_then(|slot| slot.lock().unwrap().take());
+        if let Some(progress) = progress
+            && progress.generation == self.generation
+            && progress.revision == self.doc.revision()
+            && progress.id == self.highlight_id
+            && self.highlight_cancel.is_some()
+        {
+            self.highlight = Some(progress.index);
+        }
         while let Ok(message) = self.rx.try_recv() {
             match message {
                 Message::OpenDialog(path) => {
@@ -654,10 +718,13 @@ impl EditorApp {
                     }
                 }
                 Message::Loaded(g, result) if g == self.generation => {
+                    let reloading = std::mem::take(&mut self.reloading);
                     self.work = None;
                     match result {
                         Ok(loaded) => {
                             self.open_error_kind = None;
+                            self.external_observed = None;
+                            self.external_notice = None;
                             self.doc = loaded.document;
                             self.path = Some(loaded.path);
                             self.stamp = Some(loaded.stamp);
@@ -669,7 +736,13 @@ impl EditorApp {
                         Err(e) => {
                             self.open_error_kind = e.kind();
                             self.error = Some(e.to_string());
-                            self.status = "Read-only preview · opening did not complete".into();
+                            if reloading {
+                                self.ready = true;
+                                self.status = "Reload did not complete · existing buffer and undo history retained".into();
+                                self.last_edit = Instant::now() - Duration::from_secs(1);
+                            } else {
+                                self.status = "Read-only preview · opening did not complete".into();
+                            }
                         }
                     }
                 }
@@ -678,6 +751,8 @@ impl EditorApp {
                     self.save_destination = None;
                     match result {
                         Ok(stamp) => {
+                            self.external_observed = None;
+                            self.external_notice = None;
                             self.doc.mark_saved_revision(rev);
                             self.stamp = Some(stamp);
                             self.path = Some(path.clone());
@@ -717,6 +792,8 @@ impl EditorApp {
                     if rev == self.doc.revision() {
                         match result {
                             Ok(Some(r)) => {
+                                self.break_typing_group();
+                                self.preferred_column = None;
                                 self.anchor = Some(r.start);
                                 self.cursor = r.end;
                                 self.ensure_visible();
@@ -738,14 +815,39 @@ impl EditorApp {
                         match result {
                             Ok((doc, count)) => {
                                 if count > 0 {
-                                    self.doc.apply_snapshot(&doc);
-                                    self.cursor = self.cursor.min(self.doc.len());
-                                    self.anchor = None;
-                                    self.changed();
+                                    self.break_typing_group();
+                                    let before = self.cursor_state();
+                                    let revision = self.doc.revision();
+                                    match self.doc.try_apply_snapshot(&doc) {
+                                        Ok(true) => {
+                                            self.cursor = self.cursor.min(self.doc.len());
+                                            self.anchor = None;
+                                            self.changed();
+                                            self.record_cursor_edit(revision, before);
+                                        }
+                                        Ok(false) => {}
+                                        Err(error) => {
+                                            self.error = Some(error);
+                                            self.status = "Replace all was not applied · document and undo history unchanged".into();
+                                            continue;
+                                        }
+                                    }
                                 }
-                                self.status = format!("Replaced {count} matches · one undo action");
+                                self.status = if self.doc.revision() == rev {
+                                    format!("Replaced {count} matches · document unchanged")
+                                } else {
+                                    format!("Replaced {count} matches · one undo action")
+                                };
+                                if self.doc.history_evictions() > 0
+                                    && self.doc.undo_group_revision() == Some(rev)
+                                {
+                                    self.status.push_str(" · older undo history was trimmed");
+                                }
                             }
-                            Err(e) => self.error = Some(e),
+                            Err(e) => {
+                                self.error = Some(e);
+                                self.status = "Replace all was not applied · document and undo history unchanged".into();
+                            }
                         }
                     } else {
                         self.status = "Replace all discarded because the document changed".into();
@@ -758,9 +860,15 @@ impl EditorApp {
                 {
                     if finished {
                         self.highlight_cancel = None;
+                        self.highlight_progress = None;
                     }
                     match result {
-                        Ok(index) => self.highlight = Some(index),
+                        Ok(index) => {
+                            if finished {
+                                self.highlight_base = Some(index.clone());
+                            }
+                            self.highlight = Some(index);
+                        }
                         Err(e) => {
                             self.status = format!("Plain text: {e}");
                         }
@@ -778,43 +886,90 @@ impl EditorApp {
         {
             return;
         }
-        self.cancel_highlight();
+        self.pause_highlight();
         let revision = self.doc.revision();
         self.highlight_revision = Some(revision);
         let cancel = Arc::new(AtomicBool::new(false));
         self.highlight_cancel = Some(cancel.clone());
+        let progress_slot = Arc::new(Mutex::new(None));
+        self.highlight_progress = Some(progress_slot.clone());
         let doc = self.doc.snapshot();
+        // Retain the last complete base while an intermediate prefix is shown.
+        let previous = self
+            .highlight_base
+            .as_ref()
+            .or(self.highlight.as_ref())
+            .cloned();
+        let has_complete_base = self.highlight_base.is_some();
+        let final_visible_line = self
+            .top_line
+            .saturating_add(self.visible_rows)
+            .min(doc.line_count().saturating_sub(1));
+        let visible_end = view::row_range(
+            &doc,
+            final_visible_line,
+            self.horizontal,
+            self.visible_bytes
+                .saturating_mul(4)
+                .min(view::MAX_ROW_BYTES),
+        )
+        .end;
+        let first_through = initial_highlight_through(
+            doc.len(),
+            visible_end,
+            previous.as_ref().map_or(0, |index| index.indexed_until()),
+            has_complete_base,
+        );
         let language = self.language;
         let generation = self.generation;
         let id = self.highlight_id;
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let prefix =
-                HighlightIndex::build_prefix(&doc, language, doc.len().min(128 * 1024), &cancel);
-            let finished = doc.len() <= 128 * 1024 || prefix.is_err();
-            let _ = tx.send(Message::Highlighted(
-                generation, revision, id, finished, prefix,
-            ));
-            ctx.request_repaint();
-            if !finished {
-                let result = HighlightIndex::build(&doc, language, &cancel);
-                let _ = tx.send(Message::Highlighted(generation, revision, id, true, result));
-                ctx.request_repaint();
+            let mut through = first_through;
+            let mut base = previous.clone();
+            loop {
+                let result =
+                    HighlightIndex::refresh(&doc, language, base.as_ref(), through, &cancel);
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                match result {
+                    Ok(index) if index.indexed_until() < doc.len() => {
+                        let next = index
+                            .indexed_until()
+                            .saturating_add(HIGHLIGHT_PROGRESS_BYTES)
+                            .min(doc.len());
+                        *progress_slot.lock().unwrap() = Some(HighlightProgress {
+                            generation,
+                            revision,
+                            id,
+                            index: index.clone(),
+                        });
+                        ctx.request_repaint();
+                        if has_complete_base {
+                            // Preserve the old complete suffix for convergence.
+                            base = previous.clone();
+                            through = doc.len();
+                        } else {
+                            // Initial indexing publishes bounded, replaceable
+                            // progress. Typing cannot reset a 1 GB scan to byte 0.
+                            base = Some(index);
+                            through = next;
+                        }
+                    }
+                    result => {
+                        let _ =
+                            tx.send(Message::Highlighted(generation, revision, id, true, result));
+                        ctx.request_repaint();
+                        break;
+                    }
+                }
             }
         });
     }
     fn undo(&mut self, redo: bool) {
-        if self.ready
-            && if redo {
-                self.doc.redo()
-            } else {
-                self.doc.undo()
-            }
-        {
-            self.anchor = None;
-            self.changed();
-        }
+        self.restore_history(redo);
     }
     fn event(&mut self, event: egui::Event, ctx: &egui::Context) {
         if matches!(event, egui::Event::WindowFocused(false)) {
@@ -828,11 +983,16 @@ impl EditorApp {
             return;
         }
         match event {
-            egui::Event::Text(t) if !t.is_empty() && t != "\n" && t != "\r" => self.insert(&t),
+            egui::Event::Text(t) if !t.is_empty() && t != "\n" && t != "\r" => {
+                self.insert_typed(&t)
+            }
             egui::Event::Paste(t) if !t.is_empty() => self.insert(&t),
             egui::Event::Copy => self.copy(ctx, false),
             egui::Event::Cut => self.copy(ctx, true),
-            egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => self.composition = text,
+            egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                self.break_typing_group();
+                self.composition = text;
+            }
             egui::Event::Ime(egui::ImeEvent::Commit(t)) => {
                 self.composition.clear();
                 if !t.is_empty() {
@@ -842,19 +1002,7 @@ impl EditorApp {
             egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
                 before_chars,
                 after_chars,
-            }) if self.ready => {
-                let mut start = self.cursor;
-                let mut end = self.cursor;
-                for _ in 0..before_chars.min(4096) {
-                    start = view::previous(&self.doc, start);
-                }
-                for _ in 0..after_chars.min(4096) {
-                    end = view::next(&self.doc, end);
-                }
-                self.anchor = Some(start);
-                self.cursor = end;
-                self.delete_selection();
-            }
+            }) if self.ready => self.delete_surrounding(before_chars, after_chars),
             egui::Event::Key {
                 key,
                 pressed: true,
@@ -871,6 +1019,8 @@ impl EditorApp {
                 if command {
                     match key {
                         Key::A => {
+                            self.break_typing_group();
+                            self.preferred_column = None;
                             self.anchor = Some(view::content_start(&self.doc));
                             self.cursor = self.doc.len();
                             self.ensure_visible();
@@ -889,10 +1039,18 @@ impl EditorApp {
                 }
                 let line = self.doc.line_of_offset(self.cursor);
                 let r = view::line_range(&self.doc, line);
+                let word = m.ctrl || m.alt;
                 match key {
                     Key::ArrowLeft => {
                         let pos = if !m.shift && !self.selection().is_empty() {
                             self.selection().start
+                        } else if m.mac_cmd {
+                            r.start
+                        } else if word {
+                            match self.word_target(true) {
+                                Some(pos) => pos,
+                                None => return,
+                            }
                         } else {
                             view::previous(&self.doc, self.cursor)
                         };
@@ -901,6 +1059,13 @@ impl EditorApp {
                     Key::ArrowRight => {
                         let pos = if !m.shift && !self.selection().is_empty() {
                             self.selection().end
+                        } else if m.mac_cmd {
+                            r.end
+                        } else if word {
+                            match self.word_target(false) {
+                                Some(pos) => pos,
+                                None => return,
+                            }
                         } else {
                             view::next(&self.doc, self.cursor)
                         };
@@ -918,11 +1083,7 @@ impl EditorApp {
                             line.saturating_add(jump)
                                 .min(self.doc.line_count().saturating_sub(1))
                         };
-                        let t = view::line_range(&self.doc, target);
-                        self.move_to(
-                            (t.start + self.cursor.saturating_sub(r.start)).min(t.end),
-                            m.shift,
-                        );
+                        self.move_vertical(target, m.shift);
                     }
                     Key::Home => self.move_to(
                         if command {
@@ -933,28 +1094,13 @@ impl EditorApp {
                         m.shift,
                     ),
                     Key::End => self.move_to(if command { self.doc.len() } else { r.end }, m.shift),
-                    Key::Enter if self.ready => {
-                        let newline = self.newline();
-                        self.insert(newline);
-                    }
-                    Key::Tab if self.ready => self.insert("\t"),
-                    Key::Backspace
-                        if self.ready
-                            && !self.delete_selection()
-                            && self.cursor > view::content_start(&self.doc) =>
-                    {
-                        self.anchor = Some(view::previous(&self.doc, self.cursor));
-                        self.delete_selection();
-                    }
-                    Key::Delete
-                        if self.ready
-                            && !self.delete_selection()
-                            && self.cursor < self.doc.len() =>
-                    {
-                        self.anchor = Some(view::next(&self.doc, self.cursor));
-                        self.delete_selection();
-                    }
+                    Key::Enter if self.ready => self.insert_newline(),
+                    Key::Tab if self.ready => self.indent_selection(m.shift),
+                    Key::Backspace if self.ready => self.delete_direction(true, word, m.mac_cmd),
+                    Key::Delete if self.ready => self.delete_direction(false, word, m.mac_cmd),
                     Key::Escape => {
+                        self.break_typing_group();
+                        self.preferred_column = None;
                         self.anchor = None;
                         self.composition.clear();
                     }
@@ -975,6 +1121,33 @@ impl EditorApp {
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.modal_open() {
+            return;
+        }
+        if self.find_open
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
+        {
+            self.cancel_search();
+            self.find_open = false;
+            self.find_focus = false;
+            self.editor_focus = true;
+            ctx.memory_mut(|memory| {
+                if let Some(id) = memory.focused() {
+                    memory.surrender_focus(id);
+                }
+            });
+            return;
+        }
+        let previous = ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, Key::F3));
+        let next = ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::F3));
+        if previous || next {
+            self.cancel_vim_input();
+            if self.find.is_empty() {
+                self.find_open = true;
+                self.find_focus = true;
+                self.editor_focus = false;
+            } else {
+                self.start_find(previous, false, ctx);
+            }
             return;
         }
         let shortcuts = ctx.input(|i| {
@@ -1056,6 +1229,16 @@ impl EditorApp {
                 {
                     self.save_as(ctx);
                 }
+                if ui
+                    .add_enabled(
+                        self.path.is_some() && self.ready && self.work.is_none(),
+                        egui::Button::new("Reload"),
+                    )
+                    .on_hover_text("Reload the disk version; unsaved changes require confirmation")
+                    .clicked()
+                {
+                    self.request(Pending::Reload, ctx);
+                }
                 ui.separator();
                 if ui.button("Find").clicked() {
                     self.cancel_vim_input();
@@ -1112,12 +1295,29 @@ impl EditorApp {
                 );
             });
             ui.add_space(3.0);
+            if let Some(notice) = self.external_notice.clone() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&notice).color(self.preferences.palette().warning),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(&notice);
+                    if ui.small_button("Dismiss").clicked() {
+                        self.external_notice = None;
+                    }
+                });
+            }
             if self.find_open {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Find");
-                    let response =
-                        ui.add(egui::TextEdit::singleline(&mut self.find).desired_width(220.0));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.find)
+                            .desired_width(220.0)
+                            .return_key(None),
+                    );
                     if self.find_focus {
                         response.request_focus();
                         self.find_focus = false;
@@ -1129,13 +1329,15 @@ impl EditorApp {
                         self.editor_focus = false;
                     }
                     let enter = response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if ui.button("Previous").clicked() {
+                    let backwards = ui.input(|i| i.modifiers.shift);
+                    if ui.button("Previous").clicked() || (enter && backwards) {
                         self.start_find(true, false, ctx);
                     }
-                    if ui.button("Next").clicked() || enter {
+                    if ui.button("Next").clicked() || (enter && !backwards) {
                         self.start_find(false, false, ctx);
                     }
                     if ui.button("×").clicked() {
+                        self.cancel_search();
                         self.find_open = false;
                         self.editor_focus = true;
                         ui.memory_mut(|m| m.surrender_focus(response.id));
@@ -1256,12 +1458,7 @@ impl EditorApp {
             });
         });
     }
-    fn layout_row(&self, range: Range<usize>, text: &str) -> egui::text::LayoutJob {
-        let spans = self
-            .highlight
-            .as_ref()
-            .and_then(|index| index.spans(&self.doc, range).ok())
-            .unwrap_or_default();
+    fn layout_row(&self, spans: &[HighlightSpan], text: &str) -> egui::text::LayoutJob {
         let mut job = egui::text::LayoutJob::default();
         job.wrap.max_width = f32::INFINITY;
         let mut at = 0;
@@ -1377,22 +1574,34 @@ impl EditorApp {
                 let mut click = None;
                 let mut caret = None;
                 let pointer = response.interact_pointer_pos();
-                for i in 0..self.visible_rows + 1 {
+                let row_ranges: Vec<_> = (0..self.visible_rows.saturating_add(1))
+                    .map(|i| self.top_line.saturating_add(i))
+                    .take_while(|&line| line < self.doc.line_count())
+                    .map(|line| {
+                        view::row_range(
+                            &self.doc,
+                            line,
+                            self.horizontal,
+                            self.visible_bytes
+                                .saturating_mul(4)
+                                .min(view::MAX_ROW_BYTES),
+                        )
+                    })
+                    .collect();
+                self.viewport_highlight
+                    .prepare(&self.doc, self.highlight.as_ref(), &row_ranges);
+                for (i, range) in row_ranges.iter().enumerate() {
                     let line = self.top_line + i;
                     if line >= self.doc.line_count() {
                         break;
                     }
                     let y = text_rect.top() + i as f32 * self.preferences.row_height();
-                    let range = view::row_range(
-                        &self.doc,
-                        line,
-                        self.horizontal,
-                        (self.visible_bytes * 4).min(view::MAX_ROW_BYTES),
-                    );
+                    let range = range.clone();
                     let bytes = self.doc.read(range.clone());
                     let text = std::str::from_utf8(&bytes).expect("UTF-8 viewport boundary");
-                    let galley =
-                        ui.fonts_mut(|f| f.layout_job(self.layout_row(range.clone(), text)));
+                    let galley = ui.fonts_mut(|f| {
+                        f.layout_job(self.layout_row(self.viewport_highlight.row(i), text))
+                    });
                     let pos = Pos2::new(text_x, y);
                     ui.painter().text(
                         Pos2::new(text_x - 14.0, y + 2.0),
@@ -1672,7 +1881,7 @@ impl EditorApp {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    let r = ui.text_edit_singleline(&mut self.goto);
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.goto).return_key(None));
                     r.request_focus();
                     let enter = r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if (ui.button("Go").clicked() || enter)
@@ -1939,3 +2148,11 @@ mod tests {
 #[cfg(test)]
 #[path = "app_safety_tests.rs"]
 mod safety_tests;
+
+#[cfg(test)]
+#[path = "app_input_tests.rs"]
+mod input_tests;
+
+#[cfg(test)]
+#[path = "app_highlight_tests.rs"]
+mod highlight_tests;
