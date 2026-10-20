@@ -10,6 +10,7 @@ use crate::document::Document;
 use std::fmt;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const CHECKPOINT_STRIDE: usize = 4096;
@@ -65,7 +66,7 @@ pub enum TokenKind {
 
 pub type HighlightSpan = (Range<usize>, TokenKind);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Normal,
     Identifier(Option<TokenKind>),
@@ -98,7 +99,7 @@ enum Mode {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct State {
     mode: Mode,
 }
@@ -109,7 +110,7 @@ impl Default for State {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct NumberState {
     initial_zero: bool,
     radix: bool,
@@ -208,13 +209,15 @@ struct Checkpoint {
     state: State,
 }
 
-#[derive(Debug)]
+/// Immutable, cheaply cloneable lexical checkpoints for one document revision.
+#[derive(Clone, Debug)]
 pub struct HighlightIndex {
     language: Language,
     revision: u64,
     document_len: usize,
     indexed_until: usize,
-    checkpoints: Vec<Checkpoint>,
+    checkpoints: Arc<[Checkpoint]>,
+    scanned_bytes: usize,
 }
 
 impl HighlightIndex {
@@ -223,16 +226,39 @@ impl HighlightIndex {
         Self::build_prefix(doc, language, doc.len(), cancel)
     }
 
-    /// Make the initial viewport ready without scanning the whole file.
-    /// Regions after `through` correctly remain plain until a later index is ready.
+    /// Make an initial prefix ready without scanning the whole file.
     pub fn build_prefix(
         doc: &Document,
         language: Language,
         through: usize,
         cancel: &AtomicBool,
     ) -> Result<Self, String> {
+        Self::refresh(doc, language, None, through, cancel)
+    }
+
+    /// Reuse a previous snapshot's checkpoints, relexing only the invalidated
+    /// region until complete lexer state converges in an unchanged suffix.
+    /// `through` bounds new scanning, not reuse: convergence may make the entire
+    /// old indexed suffix ready. Missing change history safely rebuilds from 0.
+    /// Work and allocation occur on the worker, never on the rendering thread.
+    pub fn refresh(
+        doc: &Document,
+        language: Language,
+        previous: Option<&Self>,
+        through: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, String> {
         check_cancel(cancel)?;
         let through = through.min(doc.len());
+        let previous = previous.filter(|old| old.language == language);
+        if let Some(old) = previous
+            && old.is_current(doc)
+            && old.indexed_until >= through
+        {
+            let mut reused = old.clone();
+            reused.scanned_bytes = 0;
+            return Ok(reused);
+        }
         let mut index = Self {
             language,
             revision: doc.revision(),
@@ -242,18 +268,50 @@ impl HighlightIndex {
             } else {
                 through
             },
-            checkpoints: Vec::new(),
+            checkpoints: Arc::from([]),
+            scanned_bytes: 0,
         };
         if language == Language::Plain {
             return Ok(index);
         }
-        index
-            .checkpoints
-            .try_reserve_exact(through / CHECKPOINT_STRIDE + 1)
+        let mut checkpoints = Vec::new();
+        checkpoints
+            .try_reserve_exact(through / CHECKPOINT_STRIDE + 2)
             .map_err(|_| "Not enough memory for syntax checkpoints; using plain text.")?;
         let mut state = State::default();
-        index.checkpoints.push(Checkpoint { offset: 0, state });
         let mut offset = 0;
+        // A candidate is in the byte-identical suffix of the previous revision.
+        // State equality alone is not enough without this unchanged-byte proof.
+        let mut reuse: Option<(&Self, usize, usize)> = None;
+        if let Some(old) = previous {
+            if old.is_current(doc) {
+                copy_checkpoints(&mut checkpoints, &old.checkpoints, 0, cancel)?;
+                if let Some(last) = checkpoints.last() {
+                    offset = last.offset;
+                    state = last.state;
+                }
+            } else if let Some((prefix, old_suffix, new_suffix)) = unchanged_regions(old, doc) {
+                // Lexing uses bounded lookahead (raw delimiters, keywords,
+                // character literals and C preprocessing). Rewind far enough
+                // that no reused state could have observed any edited byte.
+                let restart = prefix.saturating_sub(LOOKAHEAD).min(through);
+                let keep = old.checkpoints.partition_point(|cp| cp.offset <= restart);
+                copy_checkpoints(&mut checkpoints, &old.checkpoints[..keep], 0, cancel)?;
+                if let Some(last) = checkpoints.last() {
+                    offset = last.offset;
+                    state = last.state;
+                }
+                reuse = Some((old, old_suffix, new_suffix));
+            }
+        }
+        if checkpoints.is_empty() {
+            checkpoints.push(Checkpoint { offset: 0, state });
+        }
+        let mut candidate = reuse
+            .map(|(old, old_suffix, _)| {
+                old.checkpoints.partition_point(|cp| cp.offset < old_suffix)
+            })
+            .unwrap_or(0);
         while offset < through {
             check_cancel(cancel)?;
             let end = offset.saturating_add(SCAN_BLOCK).min(through);
@@ -261,18 +319,68 @@ impl HighlightIndex {
             let bytes = doc.read(offset..read_end);
             for local in 0..end - offset {
                 let absolute = offset + local;
-                if absolute != 0 && absolute % CHECKPOINT_STRIDE == 0 {
+                if absolute % CHECKPOINT_STRIDE == 0 {
                     check_cancel(cancel)?;
-                    index.checkpoints.push(Checkpoint {
+                }
+                if let Some((old, old_suffix, new_suffix)) = reuse {
+                    while let Some(cp) = old.checkpoints.get(candidate) {
+                        let mapped = new_suffix + (cp.offset - old_suffix);
+                        if mapped > absolute {
+                            break;
+                        }
+                        if mapped == absolute && cp.state == state {
+                            // Preserve shifted checkpoints instead of forcing
+                            // alignment to byte 0 after every insertion/deletion.
+                            if checkpoints
+                                .last()
+                                .is_some_and(|last| last.offset == absolute)
+                            {
+                                checkpoints.pop();
+                            }
+                            let delta = new_suffix as isize - old_suffix as isize;
+                            copy_checkpoints(
+                                &mut checkpoints,
+                                &old.checkpoints[candidate..],
+                                delta,
+                                cancel,
+                            )?;
+                            index.indexed_until = new_suffix + (old.indexed_until - old_suffix);
+                            index.scanned_bytes += local;
+                            index.checkpoints = checkpoints.into();
+                            check_cancel(cancel)?;
+                            // A partial old index may end before the requested
+                            // target; extend it without rescanning its prefix.
+                            if index.indexed_until < through {
+                                let scanned = index.scanned_bytes;
+                                let mut extended =
+                                    Self::refresh(doc, language, Some(&index), through, cancel)?;
+                                extended.scanned_bytes += scanned;
+                                return Ok(extended);
+                            }
+                            return Ok(index);
+                        }
+                        candidate += 1;
+                    }
+                }
+                if absolute - checkpoints.last().unwrap().offset >= CHECKPOINT_STRIDE {
+                    checkpoints.push(Checkpoint {
                         offset: absolute,
                         state,
                     });
                 }
                 state.step(&bytes[local..], language)?;
             }
+            index.scanned_bytes += end - offset;
             offset = end;
         }
+        if checkpoints.last().is_none_or(|cp| cp.offset != through) {
+            checkpoints.push(Checkpoint {
+                offset: through,
+                state,
+            });
+        }
         check_cancel(cancel)?;
+        index.checkpoints = checkpoints.into();
         Ok(index)
     }
 
@@ -284,17 +392,26 @@ impl HighlightIndex {
         self.indexed_until
     }
 
+    /// Bytes actually lexed by the most recent construction/refresh. Useful for
+    /// checking that edit cost scales with invalidation, not document size.
+    pub fn scanned_bytes(&self) -> usize {
+        self.scanned_bytes
+    }
+
     pub fn is_current(&self, doc: &Document) -> bool {
         self.revision == doc.revision() && self.document_len == doc.len()
     }
 
-    /// Return colored ranges relative to `range.start`. Unlisted bytes retain
-    /// the editor's normal foreground. Range boundaries should be UTF-8
-    /// boundaries when these spans are applied to a text layout.
-    ///
-    /// Work is bounded by one checkpoint interval plus 128 KiB of viewport,
-    /// with 512 bytes of lookahead. An unavailable or stale index is an error,
-    /// never a guessed lexical state.
+    fn checkpoint(&self, offset: usize) -> Option<&Checkpoint> {
+        self.checkpoints
+            .partition_point(|cp| cp.offset <= offset)
+            .checked_sub(1)
+            .and_then(|at| self.checkpoints.get(at))
+    }
+
+    /// Colored ranges relative to `range.start`. Bounded by one checkpoint
+    /// interval plus 128 KiB of viewport and 512 bytes of lookahead. Stale or
+    /// unavailable state is an error, never a guessed lexical state.
     pub fn spans(&self, doc: &Document, range: Range<usize>) -> Result<Vec<HighlightSpan>, String> {
         if !self.is_current(doc) {
             return Err("Syntax is being refreshed after an edit; using plain text.".into());
@@ -312,8 +429,7 @@ impl HighlightIndex {
             return Err("Correct syntax state is not ready here; using plain text.".into());
         }
         let checkpoint = self
-            .checkpoints
-            .get(range.start / CHECKPOINT_STRIDE)
+            .checkpoint(range.start)
             .ok_or("Correct syntax state is not ready here; using plain text.")?;
         let mut state = checkpoint.state;
         let read_end = range.end.saturating_add(LOOKAHEAD).min(doc.len());
@@ -340,6 +456,180 @@ impl HighlightIndex {
             spans.push((start..range.len(), kind));
         }
         Ok(spans)
+    }
+
+    /// Batch sorted, non-overlapping row windows. Nearby rows are lexed once;
+    /// very long physical-line gaps are skipped using checkpoints. The total
+    /// lexical work, including checkpoint prefixes, is capped at 128 KiB.
+    pub fn spans_batch(
+        &self,
+        doc: &Document,
+        ranges: &[Range<usize>],
+    ) -> Result<Vec<Vec<HighlightSpan>>, String> {
+        if ranges.len() > 1024 || !self.is_current(doc) {
+            return Err(
+                "Syntax viewport is stale or exceeds the safe work budget; using plain text."
+                    .into(),
+            );
+        }
+        let mut groups: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+        for (row, range) in ranges.iter().enumerate() {
+            if range.start > range.end
+                || range.end > doc.len()
+                || (row > 0 && ranges[row - 1].end > range.start)
+            {
+                return Err("Syntax row windows must be ordered and within the document.".into());
+            }
+            if let Some((span, rows)) = groups.last_mut()
+                && range.start.saturating_sub(span.end) <= CHECKPOINT_STRIDE
+            {
+                span.end = range.end;
+                rows.end = row + 1;
+            } else {
+                groups.push((range.clone(), row..row + 1));
+            }
+        }
+        let mut budget = 0usize;
+        for (range, _) in &groups {
+            if range.is_empty() || self.language == Language::Plain {
+                continue;
+            }
+            let cp = self
+                .checkpoint(range.start)
+                .ok_or("Correct syntax state is not ready here; using plain text.")?;
+            budget = budget.saturating_add(range.end - cp.offset);
+            if budget > MAX_HIGHLIGHT_BYTES {
+                return Err(
+                    "Syntax viewport exceeds the safe work budget; using plain text.".into(),
+                );
+            }
+        }
+        let mut result = vec![Vec::new(); ranges.len()];
+        for (range, rows) in groups {
+            let spans = self.spans(doc, range.clone())?;
+            for row in rows {
+                let window = ranges[row].start - range.start..ranges[row].end - range.start;
+                let first = spans.partition_point(|(span, _)| span.end <= window.start);
+                for (span, kind) in &spans[first..] {
+                    if span.start >= window.end {
+                        break;
+                    }
+                    let start = span.start.max(window.start) - window.start;
+                    let end = span.end.min(window.end) - window.start;
+                    if start < end {
+                        result[row].push((start..end, *kind));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+fn copy_checkpoints(
+    output: &mut Vec<Checkpoint>,
+    input: &[Checkpoint],
+    delta: isize,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    output
+        .try_reserve(input.len())
+        .map_err(|_| "Not enough memory for syntax checkpoints; using plain text.")?;
+    for chunk in input.chunks(1024) {
+        check_cancel(cancel)?;
+        for cp in chunk {
+            let cp = Checkpoint {
+                offset: cp
+                    .offset
+                    .checked_add_signed(delta)
+                    .expect("validated unchanged suffix offset"),
+                state: cp.state,
+            };
+            // Repeated shifted edits must not accumulate densely packed
+            // checkpoints. Removing the middle of a short three-point run
+            // keeps every gap <= STRIDE and the count <= 2*len/STRIDE + 2.
+            if output.len() >= 2 && cp.offset - output[output.len() - 2].offset <= CHECKPOINT_STRIDE
+            {
+                output.pop();
+            }
+            output.push(cp);
+        }
+    }
+    Ok(())
+}
+
+/// Returns the unchanged prefix and old/new starts of the identical suffix.
+/// A bounded transition log is evidence, not a content hash or revision guess.
+fn unchanged_regions(old: &HighlightIndex, doc: &Document) -> Option<(usize, usize, usize)> {
+    let changes = doc.changes_since(old.revision)?;
+    let mut revision = old.revision;
+    let mut length = old.document_len;
+    let mut prefix = length;
+    let mut suffix_len = length;
+    for change in changes {
+        if change.before_revision != revision
+            || change.changed_from > change.old_end
+            || change.old_end > length
+            || change.changed_from > change.new_end
+        {
+            return None;
+        }
+        prefix = prefix.min(change.changed_from);
+        suffix_len = suffix_len.min(length - change.old_end);
+        length = length
+            .checked_sub(change.old_end - change.changed_from)?
+            .checked_add(change.new_end - change.changed_from)?;
+        revision = change.after_revision;
+    }
+    if revision != doc.revision() || length != doc.len() {
+        return None;
+    }
+    Some((prefix, old.document_len - suffix_len, length - suffix_len))
+}
+
+/// One viewport cache, keyed by exact document revision, immutable index and
+/// row windows. A repaint never repeats lexical work for an unchanged view.
+#[derive(Default)]
+pub struct ViewportCache {
+    index: Option<HighlightIndex>,
+    ranges: Vec<Range<usize>>,
+    rows: Vec<Vec<HighlightSpan>>,
+}
+
+impl ViewportCache {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn prepare(
+        &mut self,
+        doc: &Document,
+        index: Option<&HighlightIndex>,
+        ranges: &[Range<usize>],
+    ) {
+        let Some(index) = index.filter(|index| index.is_current(doc)) else {
+            self.clear();
+            return;
+        };
+        if self.index.as_ref().is_some_and(|cached| {
+            cached.is_current(doc)
+                && cached.language == index.language
+                && Arc::ptr_eq(&cached.checkpoints, &index.checkpoints)
+        }) && self.ranges == ranges
+        {
+            return;
+        }
+        self.rows = index.spans_batch(doc, ranges).unwrap_or_default();
+        self.ranges = if ranges.len() <= 1024 {
+            ranges.to_vec()
+        } else {
+            Vec::new()
+        };
+        self.index = Some(index.clone());
+    }
+
+    pub fn row(&self, row: usize) -> &[HighlightSpan] {
+        self.rows.get(row).map(Vec::as_slice).unwrap_or_default()
     }
 }
 
@@ -1131,6 +1421,310 @@ mod tests {
         let text = format!("{}\\\nint x;", " ".repeat(SCAN_BLOCK - 1));
         let doc = document(&text);
         assert!(HighlightIndex::build(&doc, Language::C, &AtomicBool::new(false)).is_err());
+    }
+
+    fn assert_equivalent(doc: &Document, incremental: &HighlightIndex, language: Language) {
+        let fresh = HighlightIndex::build(doc, language, &AtomicBool::new(false)).unwrap();
+        assert_eq!(incremental.indexed_until(), doc.len());
+        for start in (0..doc.len()).step_by(997) {
+            let end = (start + 1777).min(doc.len());
+            assert_eq!(
+                incremental.spans(doc, start..end).unwrap(),
+                fresh.spans(doc, start..end).unwrap(),
+                "{language}, window {start}..{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn middle_edit_reuses_prefix_and_shifted_suffix() {
+        let mut doc = document(&"fn main() { let value = 42; } // comment\n".repeat(30_000));
+        let cancel = AtomicBool::new(false);
+        let old = HighlightIndex::build(&doc, Language::Rust, &cancel).unwrap();
+        let at = doc.line_start(doc.line_count() / 2) + 20;
+        doc.replace(at..at, "changed").unwrap();
+        let index =
+            HighlightIndex::refresh(&doc, Language::Rust, Some(&old), doc.len(), &cancel).unwrap();
+        assert!(
+            index.scanned_bytes() <= 3 * CHECKPOINT_STRIDE,
+            "scanned {}",
+            index.scanned_bytes()
+        );
+        assert_eq!(index.indexed_until(), doc.len());
+        assert!(!old.is_current(&doc));
+        let fresh = HighlightIndex::build(&doc, Language::Rust, &cancel).unwrap();
+        for start in [0, at - CHECKPOINT_STRIDE, at, doc.len() - 1000] {
+            let end = (start + 777).min(doc.len());
+            assert_eq!(
+                index.spans(&doc, start..end).unwrap(),
+                fresh.spans(&doc, start..end).unwrap()
+            );
+        }
+        // A shifted suffix is itself a valid base for subsequent edits.
+        doc.replace(at..at + 7, "x").unwrap();
+        let next = HighlightIndex::refresh(&doc, Language::Rust, Some(&index), doc.len(), &cancel)
+            .unwrap();
+        assert!(next.scanned_bytes() <= 3 * CHECKPOINT_STRIDE);
+    }
+
+    #[test]
+    fn skipped_edits_undo_redo_and_snapshot_branches_are_safe() {
+        let mut doc = document(&"let x = r##\"hello\"##; /* comment */\r\n".repeat(400));
+        let cancel = AtomicBool::new(false);
+        let base = HighlightIndex::build(&doc, Language::Rust, &cancel).unwrap();
+        let stale = doc.snapshot();
+        doc.replace(8000..8000, "/*").unwrap();
+        doc.replace(8100..8103, "*/let").unwrap();
+        doc.replace(5000..5000, "é😀\r\n").unwrap();
+        assert!(doc.undo());
+        assert!(doc.redo());
+        let index =
+            HighlightIndex::refresh(&doc, Language::Rust, Some(&base), doc.len(), &cancel).unwrap();
+        assert_equivalent(&doc, &index, Language::Rust);
+        assert!(index.spans(&stale, 0..10).is_err());
+        let mut branch = stale.snapshot();
+        branch.replace(0..3, "pub").unwrap();
+        let branch_index =
+            HighlightIndex::refresh(&branch, Language::Rust, Some(&index), branch.len(), &cancel)
+                .unwrap();
+        assert_equivalent(&branch, &branch_index, Language::Rust);
+        assert!(branch_index.spans(&doc, 0..10).is_err());
+    }
+
+    #[test]
+    fn deterministic_random_edits_match_full_lexing() {
+        let cases = [
+            (
+                Language::Rust,
+                "fn f<'a>() { let é = br##\"a \"# z\"##; /* a /* b */ c */ let x = '\\''; }\r\n",
+            ),
+            (
+                Language::C,
+                "int f() { auto s = R\"tag(a /* z */ )tag\"; char x = '\\''; return 2; }\r\n",
+            ),
+            (
+                Language::Json,
+                "{\"é\":\"a\\\"b\", \"x\":-2.5e+3, \"yes\":true}\r\n",
+            ),
+        ];
+        for (language, unit) in cases {
+            let mut doc = document(&unit.repeat(180));
+            let cancel = AtomicBool::new(false);
+            let mut index = Some(HighlightIndex::build(&doc, language, &cancel).unwrap());
+            let edits = [
+                "/*", "*/", "\"", "#", "é😀", "\r\n", "\\", "let", "", "R\"tag(", ")tag\"", "//",
+            ];
+            let mut random = 0x5eed_1234_u64;
+            for turn in 0..120 {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let mut at = (random as usize) % (doc.len() + 1);
+                while !doc.char_boundary(at) {
+                    at -= 1;
+                }
+                let mut end = at
+                    .saturating_add((random >> 32) as usize % 7)
+                    .min(doc.len());
+                while !doc.char_boundary(end) {
+                    end -= 1;
+                }
+                doc.replace(at..end, edits[turn % edits.len()]).unwrap();
+                if turn % 3 != 2 {
+                    continue;
+                }
+                let fresh = HighlightIndex::build(&doc, language, &cancel);
+                let updated =
+                    HighlightIndex::refresh(&doc, language, index.as_ref(), doc.len(), &cancel);
+                match (fresh, updated) {
+                    (Ok(fresh), Ok(updated)) => {
+                        assert_eq!(
+                            updated.spans(&doc, 0..doc.len()).unwrap(),
+                            fresh.spans(&doc, 0..doc.len()).unwrap(),
+                            "{language}, random edit {turn}"
+                        );
+                        index = Some(updated);
+                    }
+                    (Err(_), Err(_)) => {
+                        index = None;
+                    }
+                    (fresh, updated) => panic!(
+                        "{language}, random edit {turn}: fresh {fresh:?}, incremental {updated:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lookahead_edits_at_checkpoints_relex_delimiters_and_utf8() {
+        let cancel = AtomicBool::new(false);
+        for language in [Language::Rust, Language::C] {
+            for delta in [0, 1, 2, 15, 255] {
+                let opening = if language == Language::Rust {
+                    format!("r{}\"", "#".repeat(255))
+                } else {
+                    "R\"abcdefghijklmnop(".to_owned()
+                };
+                let closing = if language == Language::Rust {
+                    format!("\"{}", "#".repeat(255))
+                } else {
+                    ")abcdefghijklmnop\"".to_owned()
+                };
+                let mut text = " ".repeat(CHECKPOINT_STRIDE - delta);
+                text.push_str(&opening);
+                text.push_str(&"é😀\r\n".repeat(1000));
+                text.push_str(&closing);
+                text.push_str("; let int x = 2;");
+                let mut doc = document(&text);
+                let old = HighlightIndex::build(&doc, language, &cancel).unwrap();
+                let at = CHECKPOINT_STRIDE - delta;
+                doc.replace(at..at + 1, " ").unwrap();
+                let updated =
+                    HighlightIndex::refresh(&doc, language, Some(&old), doc.len(), &cancel)
+                        .unwrap();
+                assert_equivalent(&doc, &updated, language);
+            }
+        }
+    }
+
+    #[test]
+    fn edits_inside_lookahead_after_checkpoint_invalidate_earlier_raw_state() {
+        let cancel = AtomicBool::new(false);
+        for language in [Language::Rust, Language::C] {
+            let text = if language == Language::Rust {
+                format!(
+                    "{}r{}\"{}\"{}; let x = 1;",
+                    " ".repeat(CHECKPOINT_STRIDE - 2),
+                    "#".repeat(255),
+                    "é\r\n".repeat(3000),
+                    "#".repeat(255)
+                )
+            } else {
+                format!(
+                    "{}R\"abcdefghijklmnop({})abcdefghijklmnop\"; int x = 1;",
+                    " ".repeat(CHECKPOINT_STRIDE - 2),
+                    "é\r\n".repeat(3000)
+                )
+            };
+            let mut doc = document(&text);
+            let old = HighlightIndex::build(&doc, language, &cancel).unwrap();
+            let at = CHECKPOINT_STRIDE + if language == Language::Rust { 100 } else { 10 };
+            doc.replace(
+                at..at + 1,
+                if language == Language::Rust { "" } else { "Z" },
+            )
+            .unwrap();
+            let next =
+                HighlightIndex::refresh(&doc, language, Some(&old), doc.len(), &cancel).unwrap();
+            assert_equivalent(&doc, &next, language);
+        }
+    }
+
+    #[test]
+    fn repeated_shifted_edits_keep_checkpoint_count_bounded() {
+        let mut doc = document(&"let value = 123;\n".repeat(2000));
+        let cancel = AtomicBool::new(false);
+        let mut index = HighlightIndex::build(&doc, Language::Rust, &cancel).unwrap();
+        for turn in 0..200 {
+            let at = 1000 + (turn * 101) % (doc.len() - 1000);
+            doc.replace(at..at, " ").unwrap();
+            index = HighlightIndex::refresh(&doc, Language::Rust, Some(&index), doc.len(), &cancel)
+                .unwrap();
+            assert!(index.checkpoints.len() <= 2 * doc.len() / CHECKPOINT_STRIDE + 2);
+            assert!(
+                index
+                    .checkpoints
+                    .windows(2)
+                    .all(|pair| pair[1].offset - pair[0].offset <= CHECKPOINT_STRIDE)
+            );
+        }
+        assert_equivalent(&doc, &index, Language::Rust);
+    }
+
+    #[test]
+    fn partial_refresh_extends_without_relexing_prefix_and_preserves_fallbacks() {
+        let mut doc = document(&"/* comment */ let x = 1;\r\n".repeat(2000));
+        let cancel = AtomicBool::new(false);
+        let prefix = HighlightIndex::build_prefix(&doc, Language::Rust, 7777, &cancel).unwrap();
+        let full = HighlightIndex::refresh(&doc, Language::Rust, Some(&prefix), doc.len(), &cancel)
+            .unwrap();
+        assert_eq!(full.scanned_bytes(), doc.len() - 7777);
+        assert_equivalent(&doc, &full, Language::Rust);
+        doc.replace(100..100, "/*").unwrap();
+        let partial =
+            HighlightIndex::refresh(&doc, Language::Rust, Some(&full), 2000, &cancel).unwrap();
+        assert!(partial.indexed_until() < doc.len());
+        assert!(partial.spans(&doc, 2100..2200).is_err());
+        assert!(
+            HighlightIndex::refresh(
+                &doc,
+                Language::Rust,
+                Some(&full),
+                doc.len(),
+                &AtomicBool::new(true)
+            )
+            .is_err()
+        );
+        for _ in 0..70 {
+            doc.replace(10..10, " ").unwrap();
+        }
+        let rebuilt =
+            HighlightIndex::refresh(&doc, Language::Rust, Some(&full), doc.len(), &cancel).unwrap();
+        assert_eq!(rebuilt.scanned_bytes(), doc.len());
+        assert_equivalent(&doc, &rebuilt, Language::Rust);
+    }
+
+    #[test]
+    fn incremental_c_hazards_are_not_hidden_by_suffix_reuse() {
+        let cancel = AtomicBool::new(false);
+        for hazard in ["\\\r\n", "??/", "R\"bad delimiter("] {
+            let mut doc = document(&"int x; ".repeat(1000));
+            let old = HighlightIndex::build(&doc, Language::C, &cancel).unwrap();
+            let at = CHECKPOINT_STRIDE - 1;
+            doc.replace(at..at, hazard).unwrap();
+            assert!(HighlightIndex::build(&doc, Language::C, &cancel).is_err());
+            assert!(
+                HighlightIndex::refresh(&doc, Language::C, Some(&old), doc.len(), &cancel).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn batch_cache_matches_rows_and_bounds_huge_line_gaps() {
+        let mut doc = document(&"let é = 1; /* comment */\r\n".repeat(100));
+        let cancel = AtomicBool::new(false);
+        let index = HighlightIndex::build(&doc, Language::Rust, &cancel).unwrap();
+        let ranges: Vec<_> = (10..50)
+            .map(|line| doc.line_start(line)..doc.line_start(line + 1))
+            .collect();
+        let mut cache = ViewportCache::default();
+        cache.prepare(&doc, Some(&index), &ranges);
+        for (row, range) in ranges.iter().enumerate() {
+            assert_eq!(cache.row(row), index.spans(&doc, range.clone()).unwrap());
+        }
+        let allocation = cache.rows.as_ptr();
+        cache.prepare(&doc, Some(&index), &ranges);
+        assert_eq!(allocation, cache.rows.as_ptr());
+        doc.replace(0..0, " ").unwrap();
+        cache.prepare(&doc, Some(&index), &ranges);
+        assert!(cache.row(0).is_empty());
+
+        let doc = document(&format!(
+            "/*{}*/\nlet x = 42;",
+            "x".repeat(MAX_HIGHLIGHT_BYTES * 4)
+        ));
+        let index = HighlightIndex::build(&doc, Language::Rust, &cancel).unwrap();
+        let ranges = [1000..1100, doc.len() - 11..doc.len()];
+        let batch = index.spans_batch(&doc, &ranges).unwrap();
+        for (range, result) in ranges.iter().zip(batch) {
+            assert_eq!(result, index.spans(&doc, range.clone()).unwrap());
+        }
+        assert!(
+            index
+                .spans_batch(&doc, std::slice::from_ref(&(0..MAX_HIGHLIGHT_BYTES + 1)))
+                .is_err()
+        );
+        assert!(index.spans_batch(&doc, &[100..200, 0..10]).is_err());
+        assert!(index.spans_batch(&doc, &vec![0..0; 1025]).is_err());
     }
 
     #[test]

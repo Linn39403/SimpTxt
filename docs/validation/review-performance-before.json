@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "baseline_commit": "19afe1ca1ff5fd550db1fb98ac530d065998182b",
+  "workload": "ascii-rust-source",
+  "bytes": 100000000,
+  "source_sha256": {
+    "src/document.rs": "65b329502dcfd004b068aed8cddf6f0406b19f1ba927cc2cb553006ae9a15118",
+    "src/search.rs": "e5d50157ee064faab875cd94b849c3560c66bbb8477ccb29001b0717f4ad1952",
+    "src/syntax.rs": "69d41896a4c01c6600b6e23243715212a967cd4d548234486b67753ff171fbeb"
+  },
+  "forward_search_ms": 0.002,
+  "forward_search_inspected": 19,
+  "reverse_search_ms": 149.264,
+  "reverse_search_inspected": 100000000,
+  "full_syntax_ms": 1882.734,
+  "per_row_40_mean_ms": 0.691,
+  "single_contiguous_viewport_mean_ms": 0.032,
+  "insert_undo_mean_ms": 0.03,
+  "notes": [
+    "Baseline measured release-mode core routines with the same deterministic source fixture and 100 timing iterations for row and edit means.",
+    "The contiguous viewport field is a diagnostic comparison, not the baseline editor rendering path.",
+    "The original mixed-process history RSS sample is excluded: allocator reuse made it unsuitable as memory-growth evidence."
+  ]
+}

@@ -263,6 +263,11 @@ pub fn load_for_open(
         )
         .into());
     }
+    // Hold the same process-wide reservation through raw loading and indexing,
+    // so concurrent edits/load jobs cannot spend this file's incoming budget.
+    let reservation = crate::document::reserve_load_memory(
+        usize::try_from(stamp.len).map_err(|_| "File size exceeds the address space")?,
+    )?;
     let mut chunks = Vec::new();
     let mut carry = [0_u8; 3];
     let mut carry_len = 0;
@@ -321,7 +326,7 @@ pub fn load_for_open(
         .into());
     }
     check_cancel(cancel)?;
-    let document = Document::from_chunks_cancellable(chunks, cancel)?;
+    let document = Document::from_chunks_cancellable_reserved(chunks, cancel, reservation)?;
     check_cancel(cancel)?;
     Ok(LoadedFile {
         document,

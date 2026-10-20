@@ -4,15 +4,243 @@
 //! File loading should use `from_chunks_cancellable`: the convenience `from_bytes`
 //! constructor necessarily starts with an already contiguous input allocation.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use memchr::memchr_iter;
 
 pub const CHUNK_SIZE: usize = 256 * 1024;
 pub const HISTORY_LIMIT: usize = 1_000;
+/// Unique undo/redo storage plus retained bookkeeping metadata. An operation
+/// whose newest transaction cannot fit in either replay direction is rejected
+/// before publication; older entries may be evicted to keep this budget.
+pub const HISTORY_BYTE_LIMIT: usize = 128 * 1024 * 1024;
+const CHANGE_LOG_LIMIT: usize = 64;
+pub const DOCUMENT_MEMORY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
+static RESERVED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// In-flight document storage admission. Dropping it releases only the
+/// reservation; published allocations stay charged through their own tokens.
+#[derive(Debug)]
+pub struct DocumentMemoryReservation(usize);
+
+impl Drop for DocumentMemoryReservation {
+    fn drop(&mut self) {
+        RESERVED_BYTES.fetch_sub(self.0, Ordering::SeqCst);
+    }
+}
+
+impl DocumentMemoryReservation {
+    fn ensure(&mut self, bytes: usize) -> Result<(), String> {
+        let additional = bytes.saturating_sub(self.0);
+        if additional == 0 {
+            return Ok(());
+        }
+        RESERVED_BYTES
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |reserved| {
+                let proposed = reserved.checked_add(additional)?;
+                (proposed.saturating_add(resident_document_bytes()) <= DOCUMENT_MEMORY_LIMIT)
+                    .then_some(proposed)
+            })
+            .map_err(|_| "The operation would exceed the 2 GiB tracked document-memory budget. Close another tab or wait for background work; the document was not changed.".to_owned())?;
+        self.0 += additional;
+        Ok(())
+    }
+
+    /// Grow a raw-file load reservation before reading additional bytes.
+    pub fn ensure_input_bytes(&mut self, input_len: usize) -> Result<(), String> {
+        self.ensure(estimated_document_bytes(input_len))
+    }
+}
+
+pub fn reserved_document_bytes() -> usize {
+    RESERVED_BYTES.load(Ordering::SeqCst)
+}
+
+pub fn reserve_load_memory(input_len: usize) -> Result<DocumentMemoryReservation, String> {
+    reserve_memory(estimated_document_bytes(input_len))
+}
+
+fn reserve_memory(bytes: usize) -> Result<DocumentMemoryReservation, String> {
+    let mut reservation = DocumentMemoryReservation(0);
+    reservation.ensure(bytes)?;
+    Ok(reservation)
+}
+
+const SCALAR_STRIDE: usize = 256;
+
+static RESIDENT_BYTES: AtomicUsize = AtomicUsize::new(0);
+type AllocationKey = (usize, usize);
+static BACKINGS: OnceLock<Mutex<HashMap<AllocationKey, Weak<MemoryCharge>>>> = OnceLock::new();
+
+/// Conservative resident storage estimate for every live Document and snapshot
+/// in this process. Shared immutable allocations are counted once. This includes
+/// retained undo/redo, sparse indices and allocated metadata capacity, but not
+/// unrelated GUI/search buffers or allocator-specific arena overhead.
+pub fn resident_document_bytes() -> usize {
+    RESIDENT_BYTES.load(Ordering::Relaxed)
+}
+
+/// Conservative additional allocation reservation for ordinary chunked UTF-8
+/// input, including worst-case sparse newline/scalar indices and piece metadata.
+/// Callers must reserve in-flight raw input separately until it becomes a Document.
+pub fn estimated_document_bytes(input_len: usize) -> usize {
+    let pieces = input_len.div_ceil(CHUNK_SIZE - 3).saturating_add(1);
+    input_len
+        .saturating_add(
+            input_len
+                .div_ceil(NEWLINE_STRIDE)
+                .saturating_mul(std::mem::size_of::<usize>()),
+        )
+        .saturating_add(
+            input_len
+                .div_ceil(SCALAR_STRIDE)
+                .saturating_mul(std::mem::size_of::<usize>()),
+        )
+        .saturating_add(pieces.saturating_mul(2048))
+        // Loader/compact-builder scratch and the Vec-to-Arc chunk conversion.
+        .saturating_add(2 * CHUNK_SIZE)
+}
+
+#[derive(Debug)]
+struct MemoryCharge {
+    bytes: usize,
+    backing: Option<AllocationKey>,
+}
+
+impl MemoryCharge {
+    fn unique(bytes: usize) -> Arc<Self> {
+        // Arc headers and this small accounting object are retained allocations too.
+        let bytes =
+            bytes.saturating_add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>());
+        RESIDENT_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        Arc::new(Self {
+            bytes,
+            backing: None,
+        })
+    }
+
+    fn backing(bytes: &Arc<[u8]>) -> Arc<Self> {
+        let key = (bytes.as_ptr() as usize, bytes.len());
+        let mut registry = BACKINGS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        if let Some(charge) = registry.get(&key).and_then(Weak::upgrade) {
+            return charge;
+        }
+        // Include the backing Arc header and a conservative registry bucket allowance.
+        let size = bytes
+            .len()
+            .saturating_add(128 + std::mem::size_of::<Self>());
+        RESIDENT_BYTES.fetch_add(size, Ordering::Relaxed);
+        let charge = Arc::new(Self {
+            bytes: size,
+            backing: Some(key),
+        });
+        registry.insert(key, Arc::downgrade(&charge));
+        charge
+    }
+}
+
+impl Drop for MemoryCharge {
+    fn drop(&mut self) {
+        if let Some(key) = self.backing {
+            let mut registry = BACKINGS.get().unwrap().lock().unwrap();
+            if registry
+                .get(&key)
+                .is_some_and(|weak| std::ptr::eq(weak.as_ptr(), self))
+            {
+                registry.remove(&key);
+                // Do not leave an ever-growing registry after transient large jobs.
+                if registry.capacity() > registry.len().saturating_mul(4).max(64) {
+                    registry.shrink_to_fit();
+                }
+            }
+        }
+        RESIDENT_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentChange {
+    pub before_revision: u64,
+    pub after_revision: u64,
+    pub changed_from: usize,
+    pub old_end: usize,
+    pub new_end: usize,
+}
+
+#[derive(Debug, Default)]
+struct AllocationUse {
+    bytes: usize,
+    live: usize,
+    history: usize,
+}
+
+/// Incremental reference accounting: transitions visit piece metadata, never
+/// text bytes or all previous edits. History snapshots share allocations here.
+#[derive(Debug, Default)]
+struct HistoryUsage {
+    allocations: HashMap<usize, AllocationUse>,
+    retained: usize,
+}
+
+impl HistoryUsage {
+    fn adjust(&mut self, charge: &Arc<MemoryCharge>, history: bool, add: bool) {
+        let key = Arc::as_ptr(charge) as usize;
+        let entry = self
+            .allocations
+            .entry(key)
+            .or_insert_with(|| AllocationUse {
+                bytes: charge.bytes,
+                ..Default::default()
+            });
+        if entry.history > 0 && entry.live == 0 {
+            self.retained -= entry.bytes;
+        }
+        let count = if history {
+            &mut entry.history
+        } else {
+            &mut entry.live
+        };
+        if add {
+            *count += 1;
+        } else {
+            *count -= 1;
+        }
+        if entry.history > 0 && entry.live == 0 {
+            self.retained += entry.bytes;
+        }
+        if entry.history == 0 && entry.live == 0 {
+            self.allocations.remove(&key);
+        }
+    }
+
+    fn content(&mut self, content: &Content, history: bool, add: bool) {
+        content.visit_allocations(|charge| self.adjust(charge, history, add));
+    }
+
+    fn edit(&mut self, edit: &Edit, add: bool) {
+        self.adjust(&edit.memory, true, add);
+        match &edit.change {
+            Change::Splice {
+                removed, inserted, ..
+            } => {
+                for piece in removed.iter().chain(inserted) {
+                    piece.visit_allocations(|charge| self.adjust(charge, true, add));
+                }
+            }
+            Change::Snapshot { before, after } => {
+                self.content(before, true, add);
+                self.content(after, true, add);
+            }
+        }
+    }
+}
+
 /// Prototype resource ceiling, leaving room for edits to a 1 GB source file.
 /// This bounds logical document size, not total memory including undo history.
 pub const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024 * 1024;
@@ -26,6 +254,19 @@ static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
 
 fn fresh_revision() -> u64 {
     NEXT_REVISION.fetch_add(1, Ordering::Relaxed)
+}
+
+fn bulk_allocation_bytes(
+    output_len: usize,
+    inserted_text_len: usize,
+    estimated_pieces: usize,
+) -> usize {
+    if estimated_pieces > BULK_COMPACT_PIECES {
+        estimated_document_bytes(output_len)
+    } else {
+        estimated_document_bytes(inserted_text_len)
+            .saturating_add(estimated_pieces.saturating_mul(2048))
+    }
 }
 
 fn checked_document_len(current: usize, removed: usize, inserted: usize) -> Result<usize, String> {
@@ -51,6 +292,13 @@ struct Piece {
     newline_checkpoints: Arc<[usize]>,
     /// Ordinal of this piece's first newline in the shared checkpoint index.
     first_newline: usize,
+    scalars: usize,
+    scalar_checkpoints: Arc<[usize]>,
+    first_scalar: usize,
+    ascii: bool,
+    bytes_memory: Arc<MemoryCharge>,
+    newline_memory: Arc<MemoryCharge>,
+    scalar_memory: Arc<MemoryCharge>,
 }
 
 impl Piece {
@@ -63,12 +311,43 @@ impl Piece {
             }
             newlines += 1;
         }
+        let ascii = bytes[range.clone()].is_ascii();
+        let mut scalar_checkpoints = Vec::new();
+        let scalars = if ascii {
+            range.len()
+        } else {
+            let mut count = 0;
+            for (offset, byte) in bytes[range.clone()].iter().enumerate() {
+                if byte & 0xc0 != 0x80 {
+                    if count % SCALAR_STRIDE == 0 {
+                        scalar_checkpoints.push(range.start + offset);
+                    }
+                    count += 1;
+                }
+            }
+            count
+        };
+        let bytes_memory = MemoryCharge::backing(&bytes);
+        let newline_memory = MemoryCharge::unique(
+            checkpoints.len() * std::mem::size_of::<usize>() + 2 * std::mem::size_of::<usize>(),
+        );
+        let scalar_memory = MemoryCharge::unique(
+            scalar_checkpoints.len() * std::mem::size_of::<usize>()
+                + 2 * std::mem::size_of::<usize>(),
+        );
         Self {
             bytes,
             range,
             newlines,
             newline_checkpoints: Arc::from(checkpoints),
             first_newline: 0,
+            scalars,
+            scalar_checkpoints: Arc::from(scalar_checkpoints),
+            first_scalar: 0,
+            ascii,
+            bytes_memory,
+            newline_memory,
+            scalar_memory,
         }
     }
 
@@ -87,13 +366,57 @@ impl Piece {
         let first_newline =
             self.first_newline + memchr_iter(b'\n', &self.as_slice()[..range.start]).count();
         let newlines = memchr_iter(b'\n', &self.as_slice()[range.clone()]).count();
+        let first_scalar = self.first_scalar + self.scalar_count(0..range.start);
+        let scalars = self.scalar_count(range.clone());
         Self {
             bytes: self.bytes.clone(),
             range: self.range.start + range.start..self.range.start + range.end,
             newlines,
             newline_checkpoints: self.newline_checkpoints.clone(),
             first_newline,
+            scalars,
+            first_scalar,
+            ascii: self.ascii,
+            scalar_checkpoints: self.scalar_checkpoints.clone(),
+            bytes_memory: self.bytes_memory.clone(),
+            newline_memory: self.newline_memory.clone(),
+            scalar_memory: self.scalar_memory.clone(),
         }
+    }
+
+    fn visit_allocations(&self, mut visit: impl FnMut(&Arc<MemoryCharge>)) {
+        visit(&self.bytes_memory);
+        visit(&self.newline_memory);
+        visit(&self.scalar_memory);
+    }
+
+    fn scalar_count(&self, range: Range<usize>) -> usize {
+        if self.ascii {
+            return range.len();
+        }
+        self.as_slice()[range]
+            .iter()
+            .filter(|byte| **byte & 0xc0 != 0x80)
+            .count()
+    }
+
+    fn scalar_offset(&self, ordinal: usize) -> usize {
+        if ordinal >= self.scalars {
+            return self.len();
+        }
+        if self.ascii {
+            return ordinal;
+        }
+        let ordinal = self.first_scalar + ordinal;
+        let checkpoint = self.scalar_checkpoints[ordinal / SCALAR_STRIDE];
+        let relative = self.bytes[checkpoint..self.range.end]
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte & 0xc0 != 0x80)
+            .nth(ordinal % SCALAR_STRIDE)
+            .unwrap()
+            .0;
+        checkpoint + relative - self.range.start
     }
 
     fn newline_offset(&self, ordinal: usize) -> usize {
@@ -116,6 +439,7 @@ struct Content {
     newline_ends: Vec<usize>,
     len: usize,
     newlines: usize,
+    memory: Arc<MemoryCharge>,
 }
 
 impl Content {
@@ -131,12 +455,14 @@ impl Content {
             byte_ends.push(len);
             newline_ends.push(newlines);
         }
+        let memory = Self::charge(&pieces, &byte_ends, &newline_ends);
         Self {
             pieces,
             byte_ends,
             newline_ends,
             len,
             newlines,
+            memory,
         }
     }
 
@@ -162,13 +488,35 @@ impl Content {
             byte_ends.push(len);
             newline_ends.push(newlines);
         }
+        let memory = Self::charge(&pieces, &byte_ends, &newline_ends);
         Ok(Self {
             pieces,
             byte_ends,
             newline_ends,
             len,
             newlines,
+            memory,
         })
+    }
+
+    fn charge(
+        pieces: &Vec<Piece>,
+        byte_ends: &Vec<usize>,
+        newline_ends: &Vec<usize>,
+    ) -> Arc<MemoryCharge> {
+        MemoryCharge::unique(
+            std::mem::size_of::<Self>()
+                + 2 * std::mem::size_of::<usize>()
+                + pieces.capacity() * std::mem::size_of::<Piece>()
+                + (byte_ends.capacity() + newline_ends.capacity()) * std::mem::size_of::<usize>(),
+        )
+    }
+
+    fn visit_allocations(&self, mut visit: impl FnMut(&Arc<MemoryCharge>)) {
+        visit(&self.memory);
+        for piece in &self.pieces {
+            piece.visit_allocations(&mut visit);
+        }
     }
 
     fn piece_at(&self, offset: usize) -> usize {
@@ -314,12 +662,15 @@ fn push_piece(output: &mut Vec<Piece>, piece: Piece) {
     if let Some(previous) = output.last_mut()
         && Arc::ptr_eq(&previous.bytes, &piece.bytes)
         && Arc::ptr_eq(&previous.newline_checkpoints, &piece.newline_checkpoints)
+        && Arc::ptr_eq(&previous.scalar_checkpoints, &piece.scalar_checkpoints)
         && previous.first_newline + previous.newlines == piece.first_newline
+        && previous.first_scalar + previous.scalars == piece.first_scalar
         && previous.range.end == piece.range.start
         && previous.len() + piece.len() <= CHUNK_SIZE
     {
         previous.range.end = piece.range.end;
         previous.newlines += piece.newlines;
+        previous.scalars += piece.scalars;
         return;
     }
     output.push(piece);
@@ -362,7 +713,7 @@ fn coalesce_near(pieces: &mut Vec<Piece>, center: usize) {
     pieces.splice(start..end, [Piece::new(bytes, 0..len)]);
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Change {
     Splice {
         offset: usize,
@@ -381,6 +732,21 @@ struct Edit {
     change: Change,
     before_revision: u64,
     after_revision: u64,
+    envelope: Range<usize>,
+    inserted_len: usize,
+    memory: Arc<MemoryCharge>,
+}
+
+impl Edit {
+    fn charge(change: &Change) -> Arc<MemoryCharge> {
+        let pieces = match change {
+            Change::Splice {
+                removed, inserted, ..
+            } => removed.capacity() + inserted.capacity(),
+            Change::Snapshot { .. } => 0,
+        };
+        MemoryCharge::unique(std::mem::size_of::<Self>() + pieces * std::mem::size_of::<Piece>())
+    }
 }
 
 #[derive(Debug)]
@@ -390,19 +756,23 @@ pub struct Document {
     redo: Vec<Edit>,
     revision: u64,
     saved_revision: u64,
+    usage: HistoryUsage,
+    history_byte_limit: usize,
+    history_evictions: u64,
+    changes: VecDeque<DocumentChange>,
+    metadata_memory: Arc<MemoryCharge>,
 }
 
 /// Cloning is a cheap, independent snapshot. Undo/redo history is deliberately
 /// not copied into background work or saving snapshots.
 impl Clone for Document {
     fn clone(&self) -> Self {
-        Self {
-            content: self.content.clone(),
-            undo: VecDeque::new(),
-            redo: Vec::new(),
-            revision: self.revision,
-            saved_revision: self.saved_revision,
-        }
+        let mut snapshot =
+            Self::from_shared_content(self.content.clone(), self.revision, self.saved_revision);
+        snapshot.history_byte_limit = self.history_byte_limit;
+        snapshot.changes = self.changes.clone();
+        snapshot.refresh_metadata_charge();
+        snapshot
     }
 }
 
@@ -419,13 +789,154 @@ impl Document {
 
     fn from_content(content: Content) -> Self {
         let revision = fresh_revision();
-        Self {
-            content: Arc::new(content),
+        Self::from_shared_content(Arc::new(content), revision, revision)
+    }
+
+    fn from_shared_content(content: Arc<Content>, revision: u64, saved_revision: u64) -> Self {
+        let mut usage = HistoryUsage::default();
+        usage.content(&content, false, true);
+        let mut document = Self {
+            content,
             undo: VecDeque::new(),
             redo: Vec::new(),
             revision,
-            saved_revision: revision,
+            saved_revision,
+            usage,
+            history_byte_limit: HISTORY_BYTE_LIMIT,
+            history_evictions: 0,
+            changes: VecDeque::new(),
+            metadata_memory: MemoryCharge::unique(0),
+        };
+        document.refresh_metadata_charge();
+        document
+    }
+
+    fn refresh_metadata_charge(&mut self) {
+        let bytes = std::mem::size_of::<Self>()
+            + (self.undo.capacity() + self.redo.capacity()) * std::mem::size_of::<Edit>()
+            + self.changes.capacity() * std::mem::size_of::<DocumentChange>()
+            + self.usage.allocations.capacity()
+                * (std::mem::size_of::<(usize, AllocationUse)>() + 16);
+        self.metadata_memory = MemoryCharge::unique(bytes);
+    }
+
+    fn set_content(&mut self, content: Arc<Content>) {
+        // Add before removing to preserve allocation identity across both states.
+        self.usage.content(&content, false, true);
+        self.usage.content(&self.content, false, false);
+        self.content = content;
+    }
+
+    pub fn history_bytes(&self) -> usize {
+        if self.undo.is_empty() && self.redo.is_empty() {
+            return 0;
         }
+        self.usage.retained
+            + (self.undo.capacity() + self.redo.capacity()) * std::mem::size_of::<Edit>()
+            + self.usage.allocations.capacity()
+                * (std::mem::size_of::<(usize, AllocationUse)>() + 16)
+    }
+
+    /// Unique storage reachable from this document (history included). Unlike
+    /// resident_document_bytes, summing this across snapshots double-counts sharing.
+    pub fn retained_storage_bytes(&self) -> usize {
+        self.usage
+            .allocations
+            .values()
+            .map(|entry| entry.bytes)
+            .sum::<usize>()
+            + self.metadata_memory.bytes
+    }
+
+    pub fn history_evictions(&self) -> u64 {
+        self.history_evictions
+    }
+
+    pub fn undo_group_revision(&self) -> Option<u64> {
+        self.undo.back().map(|edit| edit.before_revision)
+    }
+
+    pub fn set_history_byte_limit(&mut self, limit: usize) {
+        self.history_byte_limit = limit;
+        self.trim_history();
+    }
+
+    pub fn last_change(&self) -> Option<DocumentChange> {
+        self.changes.back().copied()
+    }
+
+    pub fn changes_since(&self, revision: u64) -> Option<Vec<DocumentChange>> {
+        if revision == self.revision {
+            return Some(Vec::new());
+        }
+        let start = self
+            .changes
+            .iter()
+            .rposition(|change| change.before_revision == revision)?;
+        let changes: Vec<_> = self.changes.iter().skip(start).copied().collect();
+        let mut expected = revision;
+        for change in &changes {
+            if change.before_revision != expected {
+                return None;
+            }
+            expected = change.after_revision;
+        }
+        (expected == self.revision).then_some(changes)
+    }
+
+    fn log_change(&mut self, before_revision: u64, range: Range<usize>, inserted_len: usize) {
+        self.changes.push_back(DocumentChange {
+            before_revision,
+            after_revision: self.revision,
+            changed_from: range.start,
+            old_end: range.end,
+            new_end: range.start + inserted_len,
+        });
+        if self.changes.len() > CHANGE_LOG_LIMIT {
+            self.changes.pop_front();
+        }
+    }
+
+    fn trim_history(&mut self) {
+        loop {
+            if self.history_bytes() > self.history_byte_limit {
+                // Release old queue/accounting capacity before evicting useful
+                // edits. This also makes single-edit admission match retention.
+                self.undo.shrink_to_fit();
+                self.redo.shrink_to_fit();
+                self.usage.allocations.shrink_to_fit();
+            }
+            if self.undo.len() + self.redo.len() <= HISTORY_LIMIT
+                && self.history_bytes() <= self.history_byte_limit
+            {
+                break;
+            }
+            // Remove oldest undo first, otherwise farthest redo, never a gap.
+            let removed = self.undo.pop_front().or_else(|| {
+                if self.redo.is_empty() {
+                    None
+                } else {
+                    Some(self.redo.remove(0))
+                }
+            });
+            let Some(edit) = removed else {
+                break;
+            };
+            self.usage.edit(&edit, false);
+            self.history_evictions += 1;
+        }
+        if self.undo.is_empty() {
+            self.undo.shrink_to_fit();
+        }
+        if self.redo.is_empty() {
+            self.redo.shrink_to_fit();
+        }
+        if self.usage.allocations.capacity()
+            > self.usage.allocations.len().saturating_mul(4).max(64)
+        {
+            self.usage.allocations.shrink_to_fit();
+        }
+        self.refresh_metadata_charge();
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
@@ -446,6 +957,16 @@ impl Document {
         chunks: Vec<Arc<[u8]>>,
         cancel: &AtomicBool,
     ) -> Result<Self, String> {
+        Self::from_chunks_cancellable_reserved(chunks, cancel, DocumentMemoryReservation(0))
+    }
+
+    /// Adopt a raw-load reservation without a release/reacquire gap or charging
+    /// the same file twice. Keep this token alive throughout validation/indexing.
+    pub fn from_chunks_cancellable_reserved(
+        chunks: Vec<Arc<[u8]>>,
+        cancel: &AtomicBool,
+        mut reservation: DocumentMemoryReservation,
+    ) -> Result<Self, String> {
         let mut input_len = 0usize;
         for chunk in &chunks {
             if cancel.load(Ordering::Relaxed) {
@@ -453,6 +974,11 @@ impl Document {
             }
             input_len = checked_document_len(input_len, 0, chunk.len())?;
         }
+        // Callers may supply tiny chunks rather than the loader's usual 256 KiB
+        // chunks. Reserve their actual metadata count before allocating pieces.
+        reservation.ensure(
+            estimated_document_bytes(input_len).saturating_add(chunks.len().saturating_mul(2048)),
+        )?;
         let mut pieces = Vec::with_capacity(chunks.len());
         let mut pending = Vec::with_capacity(4);
         let mut pending_offset = 0;
@@ -589,8 +1115,78 @@ impl Document {
         output
     }
 
-    pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn chunks(&self) -> impl DoubleEndedIterator<Item = &[u8]> {
         self.content.pieces.iter().map(Piece::as_slice)
+    }
+
+    /// Piece slices intersecting the range, in reverse order. A binary seek
+    /// starts near the cursor rather than traversing an unrelated prefix.
+    pub fn chunks_reverse(&self, range: Range<usize>) -> impl Iterator<Item = (usize, &[u8])> {
+        let start = range.start.min(self.len());
+        let end = range.end.min(self.len()).max(start);
+        let first = self.content.piece_at(start);
+        let last = if end > start {
+            self.content.piece_at(end - 1) + 1
+        } else {
+            first
+        };
+        (first..last).rev().map(move |index| {
+            let at = self.content.piece_start(index);
+            let piece = &self.content.pieces[index];
+            let from = start.saturating_sub(at);
+            let to = piece.len().min(end - at);
+            (at + from, &piece.as_slice()[from..to])
+        })
+    }
+
+    /// Count Unicode scalar values, not UTF-8 bytes. Full pieces use cached counts.
+    pub fn scalar_count(&self, range: Range<usize>) -> usize {
+        let start = range.start.min(self.len());
+        let end = range.end.min(self.len()).max(start);
+        let mut at = start;
+        let mut index = self.content.piece_at(start);
+        let mut count = 0;
+        while at < end {
+            let piece = &self.content.pieces[index];
+            let from = at - self.content.piece_start(index);
+            let to = piece.len().min(end - self.content.piece_start(index));
+            count += if from == 0 && to == piece.len() {
+                piece.scalars
+            } else {
+                piece.scalar_count(from..to)
+            };
+            at += to - from;
+            index += 1;
+        }
+        count
+    }
+
+    /// Advance by Unicode scalar values, clamped at EOF. The caller may clamp
+    /// the result further to its desired line ending.
+    pub fn offset_at_scalar(&self, start: usize, column: usize) -> usize {
+        let mut at = start.min(self.len());
+        while !self.char_boundary(at) {
+            at += 1;
+        }
+        let mut remaining = column;
+        let mut index = self.content.piece_at(at);
+        while at < self.len() {
+            let piece = &self.content.pieces[index];
+            let from = at - self.content.piece_start(index);
+            let prior = if from == 0 {
+                0
+            } else {
+                piece.scalar_count(0..from)
+            };
+            let available = piece.scalars - prior;
+            if remaining <= available {
+                return self.content.piece_start(index) + piece.scalar_offset(prior + remaining);
+            }
+            remaining -= available;
+            at = self.content.byte_ends[index];
+            index += 1;
+        }
+        self.len()
     }
 
     pub fn char_boundary(&self, offset: usize) -> bool {
@@ -690,11 +1286,26 @@ impl Document {
     }
 
     pub fn replace(&mut self, range: Range<usize>, text: &str) -> Result<(), String> {
+        self.replace_grouped(range, text, false)
+    }
+
+    /// Join only adjacent insertion typing, and never cross a saved revision.
+    /// Every actual edit still gets a revision and a syntax-change log entry.
+    pub fn replace_grouped(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        join_previous: bool,
+    ) -> Result<(), String> {
         self.validate_range(&range)?;
         if self.range_equals(&range, text.as_bytes()) {
             return Ok(());
         }
         checked_document_len(self.len(), range.end - range.start, text.len())?;
+        let _reservation = reserve_memory(
+            estimated_document_bytes(text.len())
+                .saturating_add(self.content.pieces.len().saturating_mul(2048)),
+        )?;
         let inserted = text_pieces(text);
         let start_index = self.content.piece_at(range.start);
         let end_index = self.content.piece_at(range.end);
@@ -708,13 +1319,18 @@ impl Document {
         }
         let mut removed = Vec::new();
         self.content.append_range(range.clone(), &mut removed);
-        self.splice(range.clone(), &inserted);
-        self.record_change(Change::Splice {
-            offset: range.start,
-            removed,
-            inserted,
-        });
-        Ok(())
+        let after = Self::spliced_content(&self.content, range.clone(), &inserted);
+        self.commit_change(
+            after,
+            Change::Splice {
+                offset: range.start,
+                removed,
+                inserted,
+            },
+            range,
+            text.len(),
+            join_previous,
+        )
     }
 
     /// Replace sorted, non-overlapping ranges, using original byte coordinates,
@@ -770,6 +1386,12 @@ impl Document {
                 .len()
                 .saturating_mul(text.len().div_ceil(CHUNK_SIZE - 3).saturating_add(1)),
         );
+        // Sparse output shares existing and repeated inserted bytes. Reserve
+        // full output text only when the builder will actually copy that text.
+        let _reservation = reserve_memory(bulk_allocation_bytes(new_len, text.len(), estimated))?;
+        let changed_from = effective.first().unwrap().start;
+        let old_end = effective.last().unwrap().end;
+        let envelope_inserted = new_len - (self.len() - (old_end - changed_from));
         let pieces = if estimated > BULK_COMPACT_PIECES {
             // Decide before generating pieces, not after creating millions of
             // metadata entries that would make the next keystroke expensive.
@@ -812,42 +1434,155 @@ impl Document {
             return Err("Replacement cancelled".to_owned());
         }
         debug_assert_eq!(after.len, new_len);
-        let before = std::mem::replace(&mut self.content, after.clone());
-        self.record_change(Change::Snapshot { before, after });
-        Ok(())
+        let before = self.content.clone();
+        self.commit_change(
+            after.clone(),
+            Change::Snapshot { before, after },
+            changed_from..old_end,
+            envelope_inserted,
+            false,
+        )
     }
 
-    fn splice(&mut self, range: Range<usize>, inserted: &[Piece]) {
-        let mut pieces = Vec::with_capacity(self.content.pieces.len() + inserted.len() + 2);
-        self.content.append_range(0..range.start, &mut pieces);
+    fn spliced_content(content: &Content, range: Range<usize>, inserted: &[Piece]) -> Arc<Content> {
+        let mut pieces = Vec::with_capacity(content.pieces.len() + inserted.len() + 2);
+        content.append_range(0..range.start, &mut pieces);
         let edit_piece = pieces.len();
         for piece in inserted {
             push_piece(&mut pieces, piece.clone());
         }
-        self.content
-            .append_range(range.end..self.len(), &mut pieces);
+        content.append_range(range.end..content.len, &mut pieces);
         coalesce_near(&mut pieces, edit_piece);
-        self.content = Arc::new(Content::from_pieces(pieces));
+        Arc::new(Content::from_pieces(pieces))
     }
 
-    fn record_change(&mut self, change: Change) {
+    fn splice(&mut self, range: Range<usize>, inserted: &[Piece]) {
+        self.set_content(Self::spliced_content(&self.content, range, inserted));
+    }
+
+    fn single_edit_history_bytes(content: &Content, edit: &Edit) -> usize {
+        let mut usage = HistoryUsage::default();
+        usage.content(content, false, true);
+        usage.edit(edit, true);
+        usage.allocations.shrink_to_fit();
+        usage.retained
+            + 2 * std::mem::size_of::<Edit>()
+            + usage.allocations.capacity() * (std::mem::size_of::<(usize, AllocationUse)>() + 16)
+    }
+
+    /// Prepare the exact new undo group, validate both replay directions, then
+    /// publish once. Failed admission does not prune history, clear redo, change
+    /// revisions, or alter live text, including for already-prepared snapshots.
+    fn commit_change(
+        &mut self,
+        after: Arc<Content>,
+        change: Change,
+        range: Range<usize>,
+        inserted_len: usize,
+        join: bool,
+    ) -> Result<(), String> {
         let before_revision = self.revision;
-        self.revision = fresh_revision();
-        self.undo.push_back(Edit {
+        let can_join = join
+            && before_revision != self.saved_revision
+            && range.is_empty()
+            && self
+                .undo
+                .back()
+                .is_some_and(|previous| match (&previous.change, &change) {
+                    (
+                        Change::Splice {
+                            offset,
+                            removed,
+                            inserted,
+                        },
+                        Change::Splice {
+                            removed: next_removed,
+                            ..
+                        },
+                    ) => {
+                        removed.is_empty()
+                            && next_removed.is_empty()
+                            && *offset + inserted.iter().map(Piece::len).sum::<usize>()
+                                == range.start
+                    }
+                    _ => false,
+                });
+        let (change, group_before, envelope, group_inserted) = if can_join {
+            let previous = self.undo.back().unwrap();
+            let mut combined = previous.change.clone();
+            if let (Change::Splice { inserted, .. }, Change::Splice { inserted: next, .. }) =
+                (&mut combined, change)
+            {
+                for piece in next {
+                    push_piece(inserted, piece);
+                }
+                let center = inserted.len().saturating_sub(1);
+                coalesce_near(inserted, center);
+            }
+            (
+                combined,
+                previous.before_revision,
+                previous.envelope.clone(),
+                previous.inserted_len + inserted_len,
+            )
+        } else {
+            (change, before_revision, range.clone(), inserted_len)
+        };
+        let memory = Edit::charge(&change);
+        let edit = Edit {
             change,
-            before_revision,
-            after_revision: self.revision,
-        });
-        if self.undo.len() > HISTORY_LIMIT {
-            self.undo.pop_front();
+            before_revision: group_before,
+            after_revision: fresh_revision(),
+            envelope,
+            inserted_len: group_inserted,
+            memory,
+        };
+        let forward_bytes = Self::single_edit_history_bytes(&after, &edit);
+        let backward_content = match &edit.change {
+            Change::Snapshot { before, .. } => before.clone(),
+            Change::Splice {
+                offset,
+                removed,
+                inserted,
+            } => {
+                let length: usize = inserted.iter().map(Piece::len).sum();
+                Self::spliced_content(&after, *offset..*offset + length, removed)
+            }
+        };
+        let backward_bytes = Self::single_edit_history_bytes(&backward_content, &edit);
+        if forward_bytes.max(backward_bytes) > self.history_byte_limit {
+            return Err(format!(
+                "This operation needs more than the {} byte undo/redo budget. Make a smaller edit or replacement; the document and existing history were not changed.",
+                self.history_byte_limit,
+            ));
+        }
+        drop(backward_content);
+        self.set_content(after);
+        for old in &self.redo {
+            self.usage.edit(old, false);
         }
         self.redo.clear();
+        if can_join {
+            let previous = self.undo.pop_back().unwrap();
+            self.usage.edit(&previous, false);
+        }
+        self.revision = edit.after_revision;
+        self.usage.edit(&edit, true);
+        self.undo.push_back(edit);
+        self.log_change(before_revision, range, inserted_len);
+        self.trim_history();
+        debug_assert_eq!(
+            self.undo.back().map(|edit| edit.after_revision),
+            Some(self.revision)
+        );
+        Ok(())
     }
 
     pub fn undo(&mut self) -> bool {
         let Some(edit) = self.undo.pop_back() else {
             return false;
         };
+        let before_revision = self.revision;
         match &edit.change {
             Change::Splice {
                 offset,
@@ -857,10 +1592,16 @@ impl Document {
                 let inserted_len: usize = inserted.iter().map(Piece::len).sum();
                 self.splice(*offset..*offset + inserted_len, removed);
             }
-            Change::Snapshot { before, .. } => self.content = before.clone(),
+            Change::Snapshot { before, .. } => self.set_content(before.clone()),
         }
         self.revision = edit.before_revision;
+        self.log_change(
+            before_revision,
+            edit.envelope.start..edit.envelope.start + edit.inserted_len,
+            edit.envelope.len(),
+        );
         self.redo.push(edit);
+        self.trim_history();
         true
     }
 
@@ -868,6 +1609,7 @@ impl Document {
         let Some(edit) = self.redo.pop() else {
             return false;
         };
+        let before_revision = self.revision;
         match &edit.change {
             Change::Splice {
                 offset,
@@ -877,10 +1619,12 @@ impl Document {
                 let removed_len: usize = removed.iter().map(Piece::len).sum();
                 self.splice(*offset..*offset + removed_len, inserted);
             }
-            Change::Snapshot { after, .. } => self.content = after.clone(),
+            Change::Snapshot { after, .. } => self.set_content(after.clone()),
         }
         self.revision = edit.after_revision;
+        self.log_change(before_revision, edit.envelope.clone(), edit.inserted_len);
         self.undo.push_back(edit);
+        self.trim_history();
         true
     }
 
@@ -909,13 +1653,38 @@ impl Document {
     /// Adopt a finished background edit as one undo action. The caller must
     /// first verify that the original revision has not changed during work.
     pub fn apply_snapshot(&mut self, snapshot: &Document) -> bool {
+        self.try_apply_snapshot(snapshot).unwrap_or(false)
+    }
+
+    /// Fallible adoption is required for UI callers so a rejected newest undo
+    /// transaction is reported rather than confused with an unchanged snapshot.
+    pub fn try_apply_snapshot(&mut self, snapshot: &Document) -> Result<bool, String> {
         if Arc::ptr_eq(&self.content, &snapshot.content) {
-            return false;
+            return Ok(false);
         }
+        let _reservation = reserve_memory(
+            (self.content.pieces.len() + snapshot.content.pieces.len()).saturating_mul(2048),
+        )?;
+        let (range, inserted_len) = match snapshot.changes_since(self.revision) {
+            Some(changes) if changes.len() == 1 => {
+                let change = changes[0];
+                (
+                    change.changed_from..change.old_end,
+                    change.new_end - change.changed_from,
+                )
+            }
+            _ => (0..self.len(), snapshot.len()),
+        };
         let after = snapshot.content.clone();
-        let before = std::mem::replace(&mut self.content, after.clone());
-        self.record_change(Change::Snapshot { before, after });
-        true
+        let before = self.content.clone();
+        self.commit_change(
+            after.clone(),
+            Change::Snapshot { before, after },
+            range,
+            inserted_len,
+            false,
+        )?;
+        Ok(true)
     }
 }
 
@@ -1435,5 +2204,297 @@ mod tests {
         assert!(checked_document_len(MAX_DOCUMENT_BYTES, 0, 1).is_err());
         assert!(checked_document_len(usize::MAX, 0, 1).is_err());
         assert!(checked_document_len(0, 1, 0).is_err());
+    }
+    #[test]
+    fn history_budget_bounds_unique_retention_in_both_directions() {
+        let size = 64 * 1024;
+        let mut document = Document::from_bytes(vec![b'a'; size]).unwrap();
+        document.set_history_byte_limit(3 * size);
+        for index in 0..40 {
+            let replacement = if index % 2 == 0 { "b" } else { "a" }.repeat(size);
+            document.replace(0..size, &replacement).unwrap();
+            assert!(document.history_bytes() <= 3 * size);
+            assert_eq!(document.len(), size);
+        }
+        assert!(document.history_evictions() > 0);
+        let mut undos = 0;
+        while document.undo() {
+            undos += 1;
+            assert!(document.history_bytes() <= 3 * size);
+        }
+        assert_eq!(undos, 2, "two 64 KiB versions plus metadata fit the budget");
+        for _ in 0..undos {
+            assert!(document.redo());
+            assert!(document.history_bytes() <= 3 * size);
+        }
+        assert!(!document.redo());
+        assert_eq!(document.read(0..1), b"a");
+    }
+
+    #[test]
+    fn oversized_newest_transaction_rejects_atomically_and_preserves_history() {
+        let original = "a".repeat(CHUNK_SIZE);
+        let mut document = Document::from_bytes(original.as_bytes().to_vec()).unwrap();
+        document.set_history_byte_limit(16 * 1024);
+        document
+            .replace(document.len()..document.len(), " prior")
+            .unwrap();
+        let snapshot = document.snapshot();
+        let history_bytes = document.history_bytes();
+        let evictions = document.history_evictions();
+        let error = document.replace(0..document.len(), "new text").unwrap_err();
+        assert!(error.contains("undo/redo budget"));
+        assert!(Arc::ptr_eq(&document.content, &snapshot.content));
+        assert_eq!(document.revision(), snapshot.revision());
+        assert_eq!(document.history_bytes(), history_bytes);
+        assert_eq!(document.history_evictions(), evictions);
+        assert!(document.undo());
+        assert_eq!(text(&document), original);
+        assert!(document.redo());
+        assert_eq!(text(&document), format!("{original} prior"));
+    }
+
+    #[test]
+    fn accounting_counts_whole_backing_and_deduplicates_shared_allocations() {
+        let backing: Arc<[u8]> = Arc::from(vec![b'a'; CHUNK_SIZE]);
+        let mut document = Document::from_chunks(vec![backing.clone(); 4]).unwrap();
+        let same_backing = Document::from_chunks(vec![backing]).unwrap();
+        let charge = &document.content.pieces[0].bytes_memory;
+        assert!(Arc::ptr_eq(
+            charge,
+            &same_backing.content.pieces[0].bytes_memory
+        ));
+        assert!(document.retained_storage_bytes() < CHUNK_SIZE * 2);
+        let snapshot = document.snapshot();
+        let weak_content = Arc::downgrade(&snapshot.content);
+        let weak_backing = Arc::downgrade(&snapshot.content.pieces[0].bytes_memory);
+        document.replace(1..document.len(), "").unwrap();
+        document.set_history_byte_limit(0);
+        assert_eq!(document.len(), 1);
+        assert!(document.retained_storage_bytes() >= CHUNK_SIZE);
+        drop(document);
+        drop(same_backing);
+        assert!(weak_content.upgrade().is_some());
+        assert!(
+            weak_backing.upgrade().is_some(),
+            "outstanding snapshot keeps its allocation charged"
+        );
+        drop(snapshot);
+        assert!(weak_content.upgrade().is_none());
+        assert!(weak_backing.upgrade().is_none());
+    }
+
+    #[test]
+    fn shared_baseline_is_not_charged_once_per_history_action() {
+        let mut document = Document::from_bytes(vec![b'a'; 4 * CHUNK_SIZE]).unwrap();
+        document.set_history_byte_limit(256 * 1024);
+        for _ in 0..100 {
+            document.replace(500..500, "x").unwrap();
+        }
+        assert_eq!(document.history_evictions(), 0);
+        assert!(document.history_bytes() < 256 * 1024);
+        assert!(document.retained_storage_bytes() < 5 * CHUNK_SIZE);
+        for _ in 0..100 {
+            assert!(document.undo());
+        }
+    }
+
+    #[test]
+    fn snapshot_history_counts_metadata_and_shared_before_after_once() {
+        let mut document = Document::from_bytes(vec![b'a'; 4 * CHUNK_SIZE]).unwrap();
+        document.set_history_byte_limit(256 * 1024);
+        for _ in 0..20 {
+            document.replace_ranges(&[100..100, 200..200], "x").unwrap();
+        }
+        assert_eq!(document.history_evictions(), 0);
+        assert!(
+            document.history_bytes() > 10_000,
+            "retained Content and piece metadata must count"
+        );
+        assert!(
+            document.history_bytes() < 256 * 1024,
+            "unchanged megabyte backing is shared"
+        );
+        for _ in 0..20 {
+            assert!(document.undo());
+        }
+    }
+
+    #[test]
+    fn grouped_typing_keeps_one_undo_and_does_not_cross_saved_boundary() {
+        let mut document = Document::new();
+        let original = document.revision();
+        document.replace_grouped(0..0, "é", false).unwrap();
+        document.replace_grouped(2..2, "🙂", true).unwrap();
+        assert_eq!(document.undo_group_revision(), Some(original));
+        assert!(document.undo());
+        assert!(document.is_empty());
+        assert!(document.redo());
+        assert_eq!(text(&document), "é🙂");
+        document.mark_saved();
+        document.replace_grouped(6..6, "x", true).unwrap();
+        assert!(document.undo());
+        assert_eq!(text(&document), "é🙂");
+        assert!(!document.is_modified());
+        assert!(document.undo());
+        assert!(document.is_empty());
+    }
+
+    #[test]
+    fn change_log_tracks_immediate_revisions_groups_bulk_undo_and_snapshot() {
+        let mut document = Document::from_bytes(b"abcdef".to_vec()).unwrap();
+        let original = document.revision();
+        document.replace_grouped(2..2, "x", false).unwrap();
+        let first = document.revision();
+        document.replace_grouped(3..3, "é", true).unwrap();
+        let changes = document.changes_since(original).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[1].before_revision, first);
+        assert_eq!(
+            (
+                changes[1].changed_from,
+                changes[1].old_end,
+                changes[1].new_end
+            ),
+            (3, 3, 5)
+        );
+        let typed = document.revision();
+        assert!(document.undo());
+        let undo = document.changes_since(typed).unwrap();
+        assert_eq!(
+            (undo[0].changed_from, undo[0].old_end, undo[0].new_end),
+            (2, 5, 2)
+        );
+        let mut prepared = document.snapshot();
+        prepared.replace_ranges(&[1..2, 4..5], "🙂").unwrap();
+        assert!(document.apply_snapshot(&prepared));
+        let change = document.last_change().unwrap();
+        assert_eq!(
+            (change.changed_from, change.old_end, change.new_end),
+            (1, 5, 11)
+        );
+        for _ in 0..CHANGE_LOG_LIMIT + 1 {
+            document.replace(0..0, "x").unwrap();
+        }
+        assert!(document.changes_since(original).is_none());
+        assert_eq!(
+            document.changes_since(document.revision()),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn unicode_scalar_navigation_uses_counts_and_survives_slices() {
+        let reference = "aé🙂日".repeat(CHUNK_SIZE / 2);
+        let mut document = Document::from_bytes(reference.clone().into_bytes()).unwrap();
+        for scalar in [0, 1, 2, 3, 255, 256, 100_000, reference.chars().count()] {
+            let expected = reference
+                .char_indices()
+                .nth(scalar)
+                .map_or(reference.len(), |(at, _)| at);
+            assert_eq!(document.offset_at_scalar(0, scalar), expected);
+            assert_eq!(document.scalar_count(0..expected), scalar);
+        }
+        document.replace(1..3, "").unwrap();
+        let expected = format!("a{}", &reference[3..]);
+        for scalar in [0, 1, 2, 256, 70_000] {
+            let at = expected.char_indices().nth(scalar).unwrap().0;
+            assert_eq!(document.offset_at_scalar(0, scalar), at);
+            assert_eq!(document.scalar_count(0..at), scalar);
+        }
+        assert!(document.undo());
+        assert_eq!(
+            document.scalar_count(0..document.len()),
+            reference.chars().count()
+        );
+    }
+
+    #[test]
+    fn tracked_memory_admission_rejects_without_reserving_or_mutating() {
+        let document = Document::from_bytes(b"unchanged".to_vec()).unwrap();
+        assert!(reserve_memory(DOCUMENT_MEMORY_LIMIT + 1).is_err());
+        assert_eq!(text(&document), "unchanged");
+        assert!(!document.is_modified());
+    }
+
+    #[test]
+    fn sparse_large_document_edits_reserve_metadata_not_shared_text() {
+        let gib = 1024 * 1024 * 1024;
+        let pieces = gib / CHUNK_SIZE + 4;
+        let sparse = bulk_allocation_bytes(gib + 2, 1, pieces);
+        assert!(
+            sparse < 16 * 1024 * 1024,
+            "sparse Tab/replace on 1 GiB must not reserve another GiB"
+        );
+        let compact = bulk_allocation_bytes(gib, 1, BULK_COMPACT_PIECES + 1);
+        assert!(compact >= gib);
+    }
+
+    #[test]
+    fn raw_load_reservation_is_adopted_without_double_reserving() {
+        let bytes: Arc<[u8]> = Arc::from(b"reserved load".as_slice());
+        let reservation = reserve_load_memory(bytes.len()).unwrap();
+        let document = Document::from_chunks_cancellable_reserved(
+            vec![bytes],
+            &AtomicBool::new(false),
+            reservation,
+        )
+        .unwrap();
+        assert_eq!(text(&document), "reserved load");
+        assert_eq!(document.history_bytes(), 0);
+    }
+
+    #[test]
+    fn large_insertion_and_bulk_expansion_must_fit_the_redo_endpoint() {
+        let mut document = Document::from_bytes(b"a".to_vec()).unwrap();
+        document.set_history_byte_limit(16 * 1024);
+        let revision = document.revision();
+        let insertion = "b".repeat(64 * 1024);
+        assert!(document.replace(1..1, &insertion).is_err());
+        assert!(document.replace_ranges(&[0..1], &insertion).is_err());
+        assert_eq!(document.revision(), revision);
+        assert_eq!(text(&document), "a");
+        assert!(!document.undo());
+        assert_eq!(document.history_evictions(), 0);
+    }
+
+    #[test]
+    fn grouped_typing_refusal_preserves_previous_group_and_redo() {
+        let mut document = Document::new();
+        document.set_history_byte_limit(32 * 1024);
+        let first = "a".repeat(8 * 1024);
+        document.replace_grouped(0..0, &first, false).unwrap();
+        let revision = document.revision();
+        assert!(
+            document
+                .replace_grouped(first.len()..first.len(), &"b".repeat(32 * 1024), true)
+                .is_err()
+        );
+        assert_eq!(document.revision(), revision);
+        assert_eq!(text(&document), first);
+        assert!(document.undo());
+        assert!(document.is_empty());
+        assert!(document.replace(0..0, &"c".repeat(64 * 1024)).is_err());
+        assert!(
+            document.redo(),
+            "failed new edit must not clear existing redo"
+        );
+        assert_eq!(text(&document), first);
+    }
+
+    #[test]
+    fn prepared_snapshot_respects_receivers_history_budget_atomically() {
+        let mut document = Document::from_bytes(b"original".to_vec()).unwrap();
+        let mut prepared = document.snapshot();
+        prepared
+            .replace(0..prepared.len(), &"x".repeat(64 * 1024))
+            .unwrap();
+        document.set_history_byte_limit(16 * 1024);
+        let revision = document.revision();
+        assert!(document.try_apply_snapshot(&prepared).is_err());
+        assert_eq!(document.revision(), revision);
+        assert_eq!(text(&document), "original");
+        assert!(!document.undo());
+        assert_eq!(document.history_evictions(), 0);
     }
 }

@@ -1,0 +1,22 @@
+{
+  "schema":1,
+  "workload":"ascii-rust-source",
+  "bytes":100000000,
+  "iterations":100,
+  "forward_search_ms":0.001653,
+  "forward_search_inspected":19,
+  "reverse_search_ms":0.000330,
+  "reverse_search_inspected":7,
+  "full_syntax_ms":2075.920157,
+  "per_row_40_mean_ms":0.742154,
+  "batched_40_mean_ms":0.036078,
+  "cached_40_mean_ms":0.000047,
+  "insert_undo_mean_ms":0.240011,
+  "incremental_mean_ms":0.289627,
+  "incremental_p95_ms":0.501332,
+  "incremental_max_ms":0.867701,
+  "incremental_max_scanned_bytes":8193,
+  "tracked_resident_bytes":100509882,
+  "rss_kib":104144,
+  "peak_rss_kib":104676
+}

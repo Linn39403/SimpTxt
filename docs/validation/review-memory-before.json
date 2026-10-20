@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "workload": "history-fresh-process",
+  "revision": "19afe1ca1ff5fd550db1fb98ac530d065998182b",
+  "document_source_sha256": "65b329502dcfd004b068aed8cddf6f0406b19f1ba927cc2cb553006ae9a15118",
+  "replacement_bytes": 8388608,
+  "edits": 40,
+  "history_limit_actions": 1000,
+  "history_limit_bytes": null,
+  "samples": [
+    {
+      "step": 0,
+      "logical_bytes": 8388608,
+      "rss_kib": 25796,
+      "peak_rss_kib": 33792
+    },
+    {
+      "step": 1,
+      "logical_bytes": 8388608,
+      "rss_kib": 34068,
+      "peak_rss_kib": 34068
+    },
+    {
+      "step": 2,
+      "logical_bytes": 8388608,
+      "rss_kib": 42272,
+      "peak_rss_kib": 42272
+    },
+    {
+      "step": 3,
+      "logical_bytes": 8388608,
+      "rss_kib": 50472,
+      "peak_rss_kib": 50472
+    },
+    {
+      "step": 4,
+      "logical_bytes": 8388608,
+      "rss_kib": 58672,
+      "peak_rss_kib": 58672
+    },
+    {
+      "step": 8,
+      "logical_bytes": 8388608,
+      "rss_kib": 91468,
+      "peak_rss_kib": 91468
+    },
+    {
+      "step": 12,
+      "logical_bytes": 8388608,
+      "rss_kib": 124264,
+      "peak_rss_kib": 124264
+    },
+    {
+      "step": 16,
+      "logical_bytes": 8388608,
+      "rss_kib": 157056,
+      "peak_rss_kib": 157056
+    },
+    {
+      "step": 20,
+      "logical_bytes": 8388608,
+      "rss_kib": 189852,
+      "peak_rss_kib": 189852
+    },
+    {
+      "step": 24,
+      "logical_bytes": 8388608,
+      "rss_kib": 222644,
+      "peak_rss_kib": 222644
+    },
+    {
+      "step": 28,
+      "logical_bytes": 8388608,
+      "rss_kib": 255436,
+      "peak_rss_kib": 255436
+    },
+    {
+      "step": 32,
+      "logical_bytes": 8388608,
+      "rss_kib": 288228,
+      "peak_rss_kib": 288228
+    },
+    {
+      "step": 36,
+      "logical_bytes": 8388608,
+      "rss_kib": 321024,
+      "peak_rss_kib": 321024
+    },
+    {
+      "step": 40,
+      "logical_bytes": 8388608,
+      "rss_kib": 353816,
+      "peak_rss_kib": 353816
+    }
+  ],
+  "available_undo_count": 40,
+  "note": "Fresh Linux process; alternating full-document a/b replacements, verifying the first byte after every edit. RSS includes two reusable 8 MiB replacement strings. Baseline data was compiled directly from the stated revision; no prior 100 MB workload ran in this process."
+}
