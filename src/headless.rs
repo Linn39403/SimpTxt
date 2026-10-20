@@ -19,7 +19,7 @@ pub(crate) struct CaptureOptions {
     pub folder: Option<PathBuf>,
     pub tabs: Vec<PathBuf>,
     pub cursor_byte: Option<usize>,
-    pub startup_warning: bool,
+    pub startup: bool,
 }
 
 pub(crate) fn screenshot(
@@ -28,12 +28,12 @@ pub(crate) fn screenshot(
     benchmark: bool,
     options: CaptureOptions,
 ) -> Result<(), Box<dyn Error>> {
-    if benchmark && options.startup_warning {
-        return Err("Startup-warning capture is not a file benchmark".into());
+    if benchmark && options.startup {
+        return Err("Startup capture is not a file benchmark".into());
     }
     // Normal capture fails early for a missing fixture. Only the explicit
-    // startup-warning diagnostic renders native startup's recovery behavior.
-    let input_bytes = if options.startup_warning {
+    // startup diagnostic renders native startup's recovery behavior.
+    let input_bytes = if options.startup {
         std::fs::metadata(input).map_or(0, |metadata| metadata.len())
     } else {
         std::fs::metadata(input)?.len()
@@ -73,7 +73,7 @@ pub(crate) fn screenshot(
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(1.0);
     let started = Instant::now();
-    let mut app = if options.startup_warning {
+    let mut app = if options.startup {
         WorkspaceApp::from_startup_path(&ctx, Some(input.to_path_buf()), false)
     } else {
         WorkspaceApp::headless(&ctx, input)
@@ -288,9 +288,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_warning_capture_cannot_be_reported_as_a_file_benchmark() {
+    fn startup_capture_cannot_be_reported_as_a_file_benchmark() {
         let options = CaptureOptions {
-            startup_warning: true,
+            startup: true,
             ..Default::default()
         };
         let error = screenshot(
@@ -300,10 +300,7 @@ mod tests {
             options,
         )
         .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Startup-warning capture is not a file benchmark"
-        );
+        assert_eq!(error.to_string(), "Startup capture is not a file benchmark");
     }
 
     #[test]

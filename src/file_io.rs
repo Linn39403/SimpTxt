@@ -20,7 +20,7 @@
 
 use crate::document::Document;
 use std::fs::{self, File, Metadata, Permissions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,6 +32,59 @@ pub const IO_CHUNK_BYTES: usize = 256 * 1024;
 /// A preview never reads more than this amount, even for a larger request.
 pub const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 const CANCELLED: &str = "Operation cancelled; the original file was not changed.";
+
+/// An opening failure with its original I/O kind, when available. Keeping the
+/// kind avoids guessing from display text or a later, racy filesystem check.
+#[derive(Debug)]
+pub struct OpenError {
+    message: String,
+    kind: Option<io::ErrorKind>,
+}
+
+impl OpenError {
+    pub fn kind(&self) -> Option<io::ErrorKind> {
+        self.kind
+    }
+
+    fn io(context: String, error: io::Error) -> Self {
+        Self {
+            message: format!("{context}: {error}"),
+            kind: Some(error.kind()),
+        }
+    }
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+impl From<String> for OpenError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            kind: None,
+        }
+    }
+}
+
+impl From<&str> for OpenError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl From<io::Error> for OpenError {
+    fn from(error: io::Error) -> Self {
+        Self {
+            message: error.to_string(),
+            kind: Some(error.kind()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileStamp {
@@ -51,6 +104,11 @@ pub struct FileStamp {
 impl FileStamp {
     /// Inspect an existing regular file without accepting a symbolic link.
     pub fn read(path: &Path) -> Result<Self, String> {
+        Self::read_for_open(path).map_err(|error| error.to_string())
+    }
+
+    /// Inspect for opening without discarding the original I/O error kind.
+    pub fn read_for_open(path: &Path) -> Result<Self, OpenError> {
         regular_metadata(path).map(|metadata| Self::from_metadata(&metadata))
     }
 
@@ -108,9 +166,9 @@ fn require_regular(path: &Path, metadata: &Metadata) -> Result<(), String> {
     Ok(())
 }
 
-fn regular_metadata(path: &Path) -> Result<Metadata, String> {
+fn regular_metadata(path: &Path) -> Result<Metadata, OpenError> {
     let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("Cannot inspect {}: {error}", path.display()))?;
+        .map_err(|error| OpenError::io(format!("Cannot inspect {}", path.display()), error))?;
     require_regular(path, &metadata)?;
     Ok(metadata)
 }
@@ -123,10 +181,10 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
     }
 }
 
-fn open_checked(path: &Path) -> Result<(File, FileStamp), String> {
-    let stamp = FileStamp::read(path)?;
-    let file =
-        File::open(path).map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
+fn open_checked(path: &Path) -> Result<(File, FileStamp), OpenError> {
+    let stamp = FileStamp::read_for_open(path)?;
+    let file = File::open(path)
+        .map_err(|error| OpenError::io(format!("Cannot open {}", path.display()), error))?;
     let opened = file
         .metadata()
         .map_err(|error| format!("Cannot inspect opened file {}: {error}", path.display()))?;
@@ -134,7 +192,8 @@ fn open_checked(path: &Path) -> Result<(File, FileStamp), String> {
         return Err(format!(
             "{} changed while it was being opened. Try opening it again.",
             path.display()
-        ));
+        )
+        .into());
     }
     Ok((file, stamp))
 }
@@ -145,6 +204,11 @@ fn open_checked(path: &Path) -> Result<(File, FileStamp), String> {
 /// explanatory label. This preview must never become the editable document.
 /// It is deliberately independent of complete-file validation and indexing.
 pub fn preview(path: &Path, max_bytes: usize) -> Result<String, String> {
+    preview_for_open(path, max_bytes).map_err(|error| error.to_string())
+}
+
+/// Preview while retaining the kind of a failed initial inspect/open.
+pub fn preview_for_open(path: &Path, max_bytes: usize) -> Result<String, OpenError> {
     let (file, stamp) = open_checked(path)?;
     let limit = max_bytes.min(MAX_PREVIEW_BYTES);
     let mut bytes = Vec::new();
@@ -179,6 +243,16 @@ pub fn preview(path: &Path, max_bytes: usize) -> Result<String, String> {
 /// Invalid UTF-8 and NUL-containing files are rejected for editing. The caller
 /// may retain the separately obtained read-only preview on that error.
 pub fn load(path: &Path, cancel: &AtomicBool, progress: &AtomicU64) -> Result<LoadedFile, String> {
+    load_for_open(path, cancel, progress).map_err(|error| error.to_string())
+}
+
+/// Load while retaining the kind of a failed initial inspect/open. Validation,
+/// read, cancellation, and changed-file failures remain distinct from absence.
+pub fn load_for_open(
+    path: &Path,
+    cancel: &AtomicBool,
+    progress: &AtomicU64,
+) -> Result<LoadedFile, OpenError> {
     progress.store(0, Ordering::Relaxed);
     check_cancel(cancel)?;
     let (mut file, stamp) = open_checked(path)?;
@@ -186,7 +260,8 @@ pub fn load(path: &Path, cancel: &AtomicBool, progress: &AtomicU64) -> Result<Lo
         return Err(format!(
             "The file exceeds the 2 GiB editable-document safety limit: {}. It remains a read-only preview.",
             path.display()
-        ));
+        )
+        .into());
     }
     let mut chunks = Vec::new();
     let mut carry = [0_u8; 3];
@@ -200,10 +275,7 @@ pub fn load(path: &Path, cancel: &AtomicBool, progress: &AtomicU64) -> Result<Lo
             .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
         if count == 0 {
             if carry_len != 0 {
-                return Err(unsupported_encoding(
-                    path,
-                    "incomplete UTF-8 at end of file",
-                ));
+                return Err(unsupported_encoding(path, "incomplete UTF-8 at end of file").into());
             }
             break;
         }
@@ -213,19 +285,19 @@ pub fn load(path: &Path, cancel: &AtomicBool, progress: &AtomicU64) -> Result<Lo
             return Err(format!(
                 "{} grew during loading. Reopen it after the other writer has finished.",
                 path.display()
-            ));
+            )
+            .into());
         }
         buffer.truncate(carry_len + count);
         if memchr::memchr(0, &buffer).is_some() {
-            return Err(unsupported_encoding(
-                path,
-                "NUL bytes (binary or unsupported encoding)",
-            ));
+            return Err(
+                unsupported_encoding(path, "NUL bytes (binary or unsupported encoding)").into(),
+            );
         }
         let valid_len = match std::str::from_utf8(&buffer) {
             Ok(_) => buffer.len(),
             Err(error) if error.error_len().is_none() => error.valid_up_to(),
-            Err(_) => return Err(unsupported_encoding(path, "invalid UTF-8")),
+            Err(_) => return Err(unsupported_encoding(path, "invalid UTF-8").into()),
         };
         carry_len = buffer.len() - valid_len;
         debug_assert!(carry_len <= carry.len());
@@ -245,7 +317,8 @@ pub fn load(path: &Path, cancel: &AtomicBool, progress: &AtomicU64) -> Result<Lo
         return Err(format!(
             "{} changed during loading. The partially loaded document was discarded; reopen the file.",
             path.display()
-        ));
+        )
+        .into());
     }
     check_cancel(cancel)?;
     let document = Document::from_chunks_cancellable(chunks, cancel)?;
@@ -859,6 +932,106 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(fs::read(path).unwrap(), b"original");
         assert_no_temporary_files(directory.path());
+    }
+}
+
+#[cfg(test)]
+mod open_error_tests {
+    use super::*;
+
+    #[test]
+    fn missing_open_paths_retain_not_found_and_legacy_error_text() {
+        let directory = tempfile::tempdir().unwrap();
+        for path in [
+            directory.path().join("missing.txt"),
+            directory.path().join("missing-parent").join("missing.txt"),
+        ] {
+            let cancel = AtomicBool::new(false);
+            let progress = AtomicU64::new(0);
+            let stamp_error = FileStamp::read_for_open(&path).unwrap_err();
+            let preview_error = preview_for_open(&path, 64).unwrap_err();
+            let load_error = load_for_open(&path, &cancel, &progress).err().unwrap();
+            for error in [&stamp_error, &preview_error, &load_error] {
+                assert_eq!(error.kind(), Some(io::ErrorKind::NotFound));
+            }
+            assert_eq!(FileStamp::read(&path).unwrap_err(), stamp_error.to_string());
+            assert_eq!(preview(&path, 64).unwrap_err(), preview_error.to_string());
+            assert_eq!(
+                load(&path, &cancel, &progress).err().unwrap(),
+                load_error.to_string()
+            );
+            assert_eq!(progress.load(Ordering::Relaxed), 0);
+            assert!(!path.exists());
+        }
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn non_regular_and_validation_failures_are_not_classified_as_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let progress = AtomicU64::new(0);
+        for error in [
+            FileStamp::read_for_open(directory.path()).unwrap_err(),
+            preview_for_open(directory.path(), 64).unwrap_err(),
+            load_for_open(directory.path(), &cancel, &progress)
+                .err()
+                .unwrap(),
+        ] {
+            assert_eq!(error.kind(), None);
+            assert!(error.to_string().contains("not a regular file"));
+        }
+
+        // Error-looking words in a path or message cannot change its category.
+        let path = directory.path().join("No such file or directory.txt");
+        for bytes in [
+            &b"invalid \xff"[..],
+            &b"binary \0"[..],
+            &b"partial \xf0\x9f"[..],
+        ] {
+            fs::write(&path, bytes).unwrap();
+            let error = load_for_open(&path, &cancel, &progress).err().unwrap();
+            assert_eq!(error.kind(), None);
+            assert!(error.to_string().contains("cannot be edited safely"));
+            assert_eq!(
+                load(&path, &cancel, &progress).err().unwrap(),
+                error.to_string()
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        let cancelled = load_for_open(&path, &AtomicBool::new(true), &progress)
+            .err()
+            .unwrap();
+        assert_eq!(cancelled.kind(), None);
+        assert_eq!(cancelled.to_string(), CANCELLED);
+    }
+
+    #[test]
+    fn open_error_classification_never_infers_a_kind_from_text() {
+        let text = "Cannot open missing.txt: No such file or directory (os error 2)";
+        assert_eq!(OpenError::from(text).kind(), None);
+        assert_eq!(OpenError::from(text.to_owned()).kind(), None);
+        let permission = OpenError::from(io::Error::new(io::ErrorKind::PermissionDenied, text));
+        assert_eq!(permission.kind(), Some(io::ErrorKind::PermissionDenied));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_rejection_is_not_a_missing_file_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("link.txt");
+        std::os::unix::fs::symlink(directory.path().join("missing.txt"), &link).unwrap();
+        for error in [
+            FileStamp::read_for_open(&link).unwrap_err(),
+            preview_for_open(&link, 64).unwrap_err(),
+            load_for_open(&link, &AtomicBool::new(false), &AtomicU64::new(0))
+                .err()
+                .unwrap(),
+        ] {
+            assert_eq!(error.kind(), None);
+            assert!(error.to_string().contains("symbolic link"));
+        }
+        assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
     }
 }
 

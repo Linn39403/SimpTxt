@@ -42,7 +42,7 @@ git pull --ff-only
 cargo run --locked --release
 ```
 
-This command opens a new untitled document. To open the checked-in sample instead, use `cargo run --locked --release -- examples/welcome.rs`. A supplied path must name a real file; a missing startup path does not create one. Linux also requires the native windowing libraries listed in [the CI workflow](.github/workflows/ci.yml).
+This command opens a new untitled document. To open the checked-in sample instead, use `cargo run --locked --release -- examples/welcome.rs`. If the startup path is missing, SimpTxt opens a clean Untitled document without creating the missing file. Linux also requires the native windowing libraries listed in [the CI workflow](.github/workflows/ci.yml).
 
 Common shortcuts use Ctrl on Windows/Linux and Command on macOS:
 
@@ -55,7 +55,7 @@ Common shortcuts use Ctrl on Windows/Linux and Command on macOS:
 
 Use **Light theme** / **Dark theme** in the top toolbar to switch the entire interface without changing the documents. Text zoom is shared across tabs and bounded to 9–36 px.
 
-Use **Open folder…** for the sidebar. Folder arrows and open/closed folder icons are painted shapes, not icon-font glyphs. Source-file badges distinguish C/C++, headers, Rust, Python, JSON, TOML and CMake; unknown types use a generic document icon. Hover the project name to see its full path. Reopening a file focuses its existing tab, preserving unsaved edits; Save As refuses a destination already owned by another tab. Closing the window walks all unsaved tabs. Cancelling quit retains every tab, including tabs whose discard decision had already been made for that quit attempt.
+Use **Open folder…** for the sidebar and **Close Folder** beside it to close the project without closing tabs or discarding unsaved edits. Folder arrows and open/closed folder icons are painted shapes, not icon-font glyphs. Source-file badges distinguish C/C++, headers, Rust, Python, JSON, TOML and CMake; unknown types use a generic document icon. Hover the project name to see its full path. Reopening a file focuses its existing tab, preserving unsaved edits; Save As refuses a destination already owned by another tab. Closing the window walks all unsaved tabs. Cancelling quit retains every tab, including tabs whose discard decision had already been made for that quit attempt.
 
 ### Optional Vim-style mode
 
@@ -112,7 +112,7 @@ cargo run --locked -- --headless-screenshot docs/images/simptxt-light.png exampl
   --light --vim --folder examples/project --tab examples/welcome.rs --cursor-byte 168
 ```
 
-A missing startup path leaves a usable untitled editor with a dismissible, nonmodal warning; it never silently creates the missing file. See the [deliberate missing-path test capture](docs/ui-feedback-validation.md#startup-recovery), which is **not the normal startup screen**. Launching without a file argument shows no warning.
+A missing startup path opens a clean, usable Untitled editor without a banner or dialog and without creating a file. See the [clean startup capture](docs/ui-feedback-validation.md#startup-recovery). Other opening errors and real save failures remain visible.
 
 This runs the actual editor, waits for the sample's loading/highlighting and lazy folder listings, and captures its GPU-rendered output without an OS window. It still requires a suitable graphics driver. `WGPU_BACKEND` can select `vulkan`, `metal`, or `dx12` where supported.
 

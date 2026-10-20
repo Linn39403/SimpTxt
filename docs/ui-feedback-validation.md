@@ -4,21 +4,19 @@ These changes follow the workspace implementation merged in [PR #1](https://gith
 
 ## Startup recovery
 
-The copy/paste build command now starts an untitled editor instead of passing a placeholder filename. If an explicit startup path cannot be opened, the shared native startup constructor leaves an editable Untitled tab and shows a dismissible nonmodal warning. The attempted path is retained in the message; long details truncate with a full tooltip. No missing file is created, and a failed path is not treated as successfully loaded.
+The copy/paste build command starts an untitled editor instead of passing a placeholder filename. A missing command-line startup path now opens a clean, editable Untitled tab with no warning banner or dialog. No missing file is created, and the failed path is not assigned as a loaded file or save destination. Permission, unsupported-format and other genuine opening errors remain visible, as do interactive Open errors and all save failures.
 
-Seven independent regressions exercise missing and valid startup paths, actual paint output and New-button interaction, immediate typing, subsequent valid Open, preserved dirty buffers/undo/cursor/path, inactive asynchronous failure, stale generations, and separation from ordinary Open errors. Ordinary Open/Reload safety behavior remains unchanged.
+Regression tests exercise missing and valid startup paths, actual paint output and New-button interaction, immediate typing, subsequent valid Open, preserved dirty buffers/undo/cursor/path, inactive asynchronous failures, stale generations, and separation from ordinary Open/save errors. Error classification comes from the failing I/O operation, not error-message matching or a later filesystem check.
 
-**Deliberately simulated error, not normal startup:** the screenshot below supplies the nonexistent `path/to/file.rs` to test recovery. Launching SimpTxt normally without a file argument opens a clean Untitled editor with no warning.
+![Clean Untitled editor after a missing startup path](images/startup-clean.png)
 
-![Deliberate missing-path test, not the normal startup screen](images/startup-warning.png)
-
-This is the real application rendered at 1280×800, not a mockup. Reproduce this diagnostic screenshot with:
+This is the real application rendered at 1280×800 with an intentionally nonexistent startup path. It has the same clean Untitled appearance as launching without a file argument, not a mockup. Reproduce it with:
 
 ```sh
-cargo run --locked -- --headless-screenshot startup-warning.png path/to/file.rs --startup-warning
+cargo run --locked -- --headless-screenshot startup-clean.png path/to/file.rs --startup
 ```
 
-The explicit diagnostic flag permits a startup-error screenshot; ordinary captures still reject a missing fixture. It is rejected for `--headless-benchmark`, so an error screen cannot count as a successful file benchmark. Both guard cases have tests. The screenshot run also checked that `path/to/file.rs` did not exist before or afterward.
+The explicit `--startup` capture flag exercises native startup recovery; ordinary file captures still reject a missing fixture. It is rejected for `--headless-benchmark`, so a blank document cannot count as a successful file benchmark. Both guard cases have tests. The screenshot run also checks that `path/to/file.rs` does not exist before or afterward.
 
 ## Sidebar rendering
 
@@ -44,6 +42,14 @@ The new captures show an expanded `src` folder, collapsed `include`, a C++ sourc
 
 ## Checks and limits
 
-Final local checks passed: formatting, strict Clippy, build, **188 tests** (83 core, 100 desktop/UI, one randomized and four real-file integrations), and **88 no-desktop tests**. Three expensive file fixtures remain opt-in; documentation tests ran successfully with none present. [Command log](validation/ui-feedback-checks.log) and [source/capture hashes](validation/ui-feedback-provenance.json) record this snapshot.
+The previous startup/sidebar snapshot (`a903c0934f12a21762df0177eeeba4c45e7460f5`) passed: formatting, strict Clippy, build, **188 tests** (83 core, 100 desktop/UI, one randomized and four real-file integrations), and **88 no-desktop tests**. Three expensive file fixtures remain opt-in; documentation tests ran successfully with none present. [Command log](validation/ui-feedback-checks.log) and [source/capture hashes](validation/ui-feedback-provenance.json) record that earlier snapshot. The clean-startup follow-up is recorded separately below.
 
-The captures use the actual shared workspace and egui/wgpu renderer with software Vulkan. They establish visual rendering, not native OS input, file-picker automation or accessibility acceptance. Native-window smoke and the complete suite remain in all-three-OS CI; consult the follow-up PR and [Actions](https://github.com/Linn39403/SimpTxt/actions) for the published revision's hosted result. No new 1 GB performance claim is made for these UI-only changes; earlier measurements retain their original source scope.
+The captures use the actual shared workspace and egui/wgpu renderer with software Vulkan. They establish visual rendering, not native OS input, file-picker automation or accessibility acceptance. Native-window smoke and the complete suite remain in all-three-OS CI; consult [Actions](https://github.com/Linn39403/SimpTxt/actions) for the published revision's hosted result. No new 1 GB performance claim is made for these UI-only changes; earlier measurements retain their original source scope.
+
+## Clean startup and Close Folder follow-up
+
+The new **Close Folder** control beside **Open folder…** clears the project/sidebar and cancels stale listings and file selections. It does not close tabs or change their edits, undo histories, cursors or disk files. Closing a folder also invalidates an outstanding folder-picker result.
+
+The later missing-path preference is deliberately narrower than hiding all errors: only a typed `NotFound` result from opening the command-line startup file is quiet. Real save failures, permissions, validation failures and interactive Open errors remain visible. The new startup capture replaces the earlier warning screenshot; the dark/light sidebar images above were refreshed from this follow-up, while the Before image retains its baseline source scope.
+
+Final local checks passed: formatting, strict Clippy, build, **203 tests** (87 core, 111 desktop/UI, one randomized and four real-file integrations), and **92 no-desktop tests**. Three expensive file fixtures remain opt-in; documentation tests completed with none present. [Command log](validation/clean-startup-close-folder-checks.log) and [source/capture hashes](validation/clean-startup-close-folder-provenance.json) record this follow-up. Hosted CI is tracked separately for the published revision.

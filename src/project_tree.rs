@@ -573,15 +573,22 @@ impl ProjectTree {
     /// Replace only the browser's root and cache. Existing editor tabs are not
     /// owned by this component and must be left alone by the caller.
     pub fn set_root(&mut self, root: PathBuf) {
+        self.clear_root();
+        self.directories.insert(root.clone(), Directory::queued());
+        self.root = Some(root);
+    }
+
+    /// Close the browser without changing any file or editor tab. Invalidate
+    /// queued and completed selections as well as any listing still in flight.
+    pub fn clear_root(&mut self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(active) = &self.active {
             active.cancel.store(true, Ordering::Release);
         }
         // Keep the old active slot until its response arrives: repeated root
-        // changes must not spawn workers or build a queue of stale requests.
+        // changes or close/reopen must not build a queue of stale requests.
         self.directories.clear();
-        self.directories.insert(root.clone(), Directory::queued());
-        self.root = Some(root);
+        self.root = None;
         self.cached_entries = 0;
         self.pending_selection = None;
         self.selected_file = None;
@@ -1233,6 +1240,197 @@ mod tests {
         assert!(!tree.directories.contains_key(&old));
         assert!(tree.directories[&new].entries.is_empty());
         assert!(tree.selected_file.is_none());
+    }
+
+    #[test]
+    fn closing_root_cancels_listing_and_clears_all_browser_state() {
+        let mut tree = ProjectTree::new();
+        let root = PathBuf::from("/project");
+        let child = root.join("child");
+        let file = root.join("selected.txt");
+        tree.set_root(root.clone());
+        tree.directories
+            .insert(child, ready_directory(vec![entry(file.clone())]));
+        tree.cached_entries = 1;
+        tree.pending_selection = Some(file.clone());
+        tree.selected_file = Some(file);
+        tree.notice = Some("Old folder notice".into());
+        let generation = active(&mut tree, &root, 11);
+        let cancel = Arc::clone(&tree.active.as_ref().unwrap().cancel);
+
+        tree.clear_root();
+
+        assert!(tree.root().is_none());
+        assert!(tree.directories.is_empty());
+        assert_eq!(tree.cached_entries, 0);
+        assert!(tree.pending_selection.is_none());
+        assert!(tree.selected_file.is_none());
+        assert!(tree.notice.is_none());
+        assert!(cancel.load(Ordering::Acquire));
+        assert_ne!(tree.generation.load(Ordering::Acquire), generation);
+        // Keep the slot occupied until the real worker's acknowledgment arrives.
+        assert_eq!(tree.active.as_ref().unwrap().id, 11);
+
+        tree.apply_response(Response {
+            id: 11,
+            generation,
+            path: root.clone(),
+            outcome: Outcome::Listing(Ok(Listing {
+                entries: vec![entry(root.join("late.txt"))],
+                has_more: false,
+            })),
+        });
+        assert!(tree.is_settled());
+        assert!(tree.root().is_none());
+        assert!(tree.directories.is_empty());
+        assert_eq!(tree.cached_entries, 0);
+        assert!(tree.selected_file.is_none());
+    }
+
+    #[test]
+    fn closing_root_rejects_late_selection_success_and_error() {
+        let mut tree = ProjectTree::new();
+        let root = PathBuf::from("/project");
+        let file = root.join("late.txt");
+        for result in [Ok(file.clone()), Err("Late selection failed".into())] {
+            tree.set_root(root.clone());
+            let generation = active(&mut tree, &file, 17);
+            tree.clear_root();
+            tree.apply_response(Response {
+                id: 17,
+                generation,
+                path: file.clone(),
+                outcome: Outcome::Selection(result),
+            });
+            assert!(tree.is_settled());
+            assert!(tree.root().is_none());
+            assert!(tree.selected_file.is_none());
+            assert!(tree.pending_selection.is_none());
+            assert!(tree.notice.is_none());
+        }
+    }
+
+    #[test]
+    fn close_and_reopen_keeps_one_worker_request_and_rejects_old_generation() {
+        let mut tree = ProjectTree::new();
+        // A controlled channel makes the response race deterministic without
+        // sleeps or relying on a filesystem operation to stay slow.
+        let (tx, requests) = mpsc::sync_channel(1);
+        let (responses, rx) = mpsc::sync_channel(1);
+        tree.tx = Some(tx);
+        tree.rx = rx;
+        let root = PathBuf::from("/project");
+        let context = egui::Context::default();
+        tree.set_root(root.clone());
+        tree.dispatch(&context);
+        let stale = requests.try_recv().unwrap();
+        assert!(matches!(stale.job, Job::List { .. }));
+
+        // Reopening the exact same path still has to discard the old result.
+        // Repeated close/reopen cannot enqueue work behind the outstanding job.
+        for _ in 0..4 {
+            tree.clear_root();
+            tree.set_root(root.clone());
+            tree.dispatch(&context);
+            assert!(matches!(
+                requests.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert_eq!(tree.active.as_ref().unwrap().id, stale.id);
+        }
+        assert!(stale.cancel.load(Ordering::Acquire));
+        responses
+            .send(Response {
+                id: stale.id,
+                generation: stale.generation,
+                path: root.clone(),
+                outcome: Outcome::Listing(Ok(Listing {
+                    entries: vec![entry(root.join("stale.txt"))],
+                    has_more: false,
+                })),
+            })
+            .unwrap();
+        tree.poll(&context);
+        let fresh = requests.try_recv().unwrap();
+        assert_ne!(fresh.id, stale.id);
+        assert_ne!(fresh.generation, stale.generation);
+        assert!(!fresh.cancel.load(Ordering::Acquire));
+        assert!(tree.directories[&root].entries.is_empty());
+
+        responses
+            .send(Response {
+                id: fresh.id,
+                generation: fresh.generation,
+                path: root.clone(),
+                outcome: Outcome::Listing(Ok(Listing {
+                    entries: vec![entry(root.join("fresh.txt"))],
+                    has_more: false,
+                })),
+            })
+            .unwrap();
+        tree.poll(&context);
+        assert!(tree.is_settled());
+        assert_eq!(tree.root(), Some(root.as_path()));
+        assert_eq!(tree.cached_entries, 1);
+        assert_eq!(
+            tree.directories[&root].entries[0].path,
+            root.join("fresh.txt")
+        );
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn closing_real_worker_and_reopening_preserves_files_and_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let file = root.join("keep.txt");
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(&file, b"keep this content\n").unwrap();
+        fs::write(nested.join("also-keep.txt"), b"nested content\n").unwrap();
+        let mut tree = ProjectTree::new();
+        let context = egui::Context::default();
+        tree.set_root(root.clone());
+        tree.perform(Action::Select(file.clone()));
+        tree.dispatch(&context);
+        tree.clear_root();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !tree.is_settled() && std::time::Instant::now() < deadline {
+            tree.poll(&context);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(tree.is_settled());
+        assert!(tree.root().is_none());
+        assert!(tree.selected_file.is_none());
+
+        tree.set_root(root.clone());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !tree.is_settled() && std::time::Instant::now() < deadline {
+            tree.poll(&context);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(tree.is_settled());
+        assert_eq!(tree.directories[&root].entries.len(), 2);
+        tree.perform(Action::Select(file.clone()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while tree.selected_file.is_none() && std::time::Instant::now() < deadline {
+            tree.poll(&context);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(tree.selected_file.take(), Some(file.clone()));
+        tree.clear_root();
+        tree.clear_root(); // Closing an already closed folder is harmless.
+        assert!(tree.is_settled());
+        assert_eq!(fs::read(&file).unwrap(), b"keep this content\n");
+        assert_eq!(
+            fs::read(nested.join("also-keep.txt")).unwrap(),
+            b"nested content\n"
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
     }
 
     #[test]

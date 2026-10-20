@@ -10,7 +10,7 @@ mod app_vim;
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Sense, Vec2};
 use simptxt::{
     document::Document,
-    file_io::{self, FileStamp, LoadedFile},
+    file_io::{self, FileStamp, LoadedFile, OpenError},
     search,
     syntax::{HighlightIndex, Language, TokenKind},
 };
@@ -28,7 +28,7 @@ use std::{
 enum Message {
     OpenDialog(Option<PathBuf>),
     SaveDialog(Option<PathBuf>),
-    Loaded(u64, Result<LoadedFile, String>),
+    Loaded(u64, Result<LoadedFile, OpenError>),
     Saved(u64, u64, PathBuf, Result<FileStamp, String>),
     Found(u64, u64, u64, Result<Option<Range<usize>>, String>),
     Replaced(u64, u64, u64, Result<(Document, usize), String>),
@@ -86,6 +86,7 @@ pub struct EditorApp {
     last_edit: Instant,
     status: String,
     error: Option<String>,
+    open_error_kind: Option<std::io::ErrorKind>,
     pending: Option<Pending>,
     continue_after_save: bool,
     overwrite: Option<PathBuf>,
@@ -145,6 +146,7 @@ impl EditorApp {
             last_edit: Instant::now(),
             status: "Ready".into(),
             error: None,
+            open_error_kind: None,
             pending: None,
             continue_after_save: false,
             overwrite: None,
@@ -435,6 +437,7 @@ impl EditorApp {
         }
     }
     fn open_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.open_error_kind = None;
         self.cancel_highlight();
         self.cancel_search();
         self.generation += 1;
@@ -443,12 +446,13 @@ impl EditorApp {
         self.path = Some(path.clone());
         self.stamp = None;
         self.ready = false;
-        self.doc = match file_io::preview(&path, 64 * 1024) {
+        self.doc = match file_io::preview_for_open(&path, 64 * 1024) {
             Ok(preview) => {
                 Document::from_bytes(preview.into_bytes()).unwrap_or_else(|_| Document::new())
             }
             Err(e) => {
-                self.error = Some(e);
+                self.open_error_kind = e.kind();
+                self.error = Some(e.to_string());
                 Document::new()
             }
         };
@@ -466,7 +470,7 @@ impl EditorApp {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = file_io::load(&path, &cancel, &progress);
+            let result = file_io::load_for_open(&path, &cancel, &progress);
             let _ = tx.send(Message::Loaded(generation, result));
             ctx.request_repaint();
         });
@@ -653,6 +657,7 @@ impl EditorApp {
                     self.work = None;
                     match result {
                         Ok(loaded) => {
+                            self.open_error_kind = None;
                             self.doc = loaded.document;
                             self.path = Some(loaded.path);
                             self.stamp = Some(loaded.stamp);
@@ -662,7 +667,8 @@ impl EditorApp {
                             self.last_edit = Instant::now() - Duration::from_secs(1);
                         }
                         Err(e) => {
-                            self.error = Some(e);
+                            self.open_error_kind = e.kind();
+                            self.error = Some(e.to_string());
                             self.status = "Read-only preview · opening did not complete".into();
                         }
                     }

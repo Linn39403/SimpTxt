@@ -40,7 +40,10 @@ struct QuitState {
 }
 
 enum WorkspaceMessage {
-    Folder(Option<PathBuf>),
+    Folder {
+        generation: u64,
+        path: Option<PathBuf>,
+    },
 }
 
 /// The native window owns a workspace, not an interchangeable document slot.
@@ -52,6 +55,8 @@ pub struct WorkspaceApp {
     vim_enabled: bool,
     project: ProjectTree,
     folder_dialog_pending: bool,
+    folder_dialog_request: Option<u64>,
+    folder_dialog_generation: u64,
     deferred_project_path: Option<PathBuf>,
     tx: Sender<WorkspaceMessage>,
     rx: Receiver<WorkspaceMessage>,
@@ -67,7 +72,8 @@ impl WorkspaceApp {
         Self::from_startup_path(&cc.egui_ctx, path, smoke)
     }
 
-    /// Startup failures are recoverable without dismissing a modal first.
+    /// A missing startup path opens a quiet Untitled buffer. Other startup
+    /// failures are recoverable without dismissing a modal first.
     /// Keep this path shared with native startup so it can be exercised without
     /// a native window or a platform file picker.
     pub(crate) fn from_startup_path(
@@ -103,6 +109,8 @@ impl WorkspaceApp {
             vim_enabled: false,
             project: ProjectTree::new(),
             folder_dialog_pending: false,
+            folder_dialog_request: None,
+            folder_dialog_generation: 0,
             deferred_project_path: None,
             tx,
             rx,
@@ -115,10 +123,13 @@ impl WorkspaceApp {
     }
 
     fn recover_startup_tab(&mut self, index: usize, error: String, ctx: &egui::Context) {
-        let error = match self.tabs[index].editor.path.as_ref() {
-            Some(path) => format!("Cannot open {}: {error}", path.display()),
-            None => error,
-        };
+        let editor = &self.tabs[index].editor;
+        let warning = (editor.open_error_kind != Some(std::io::ErrorKind::NotFound)).then(|| {
+            match editor.path.as_ref() {
+                Some(path) => format!("Cannot open {}: {error}", path.display()),
+                None => error,
+            }
+        });
         // A failed initial preview must not become a loaded document or acquire
         // a save destination. Dropping it also cancels its jobs and isolates any
         // late completion on the discarded receiver.
@@ -129,7 +140,7 @@ impl WorkspaceApp {
         self.tabs[index].editor = editor;
         self.preferences.apply_theme(ctx);
         self.startup_load = None;
-        self.startup_warning = Some(error);
+        self.startup_warning = warning;
     }
 
     fn finish_startup_open(&mut self, ctx: &egui::Context) {
@@ -255,15 +266,17 @@ impl WorkspaceApp {
     }
 
     fn open_path_from(&mut self, owner: TabId, path: PathBuf, ctx: &egui::Context) {
-        if self.index(owner).is_none() {
+        let Some(owner_index) = self.index(owner) else {
             return;
-        }
+        };
+        self.tabs[owner_index].editor.open_error_kind = None;
         // Check the supplied leaf before canonicalization. Otherwise a symlink
         // would silently evade file_io's explicit-target-only safety policy.
-        let stamp = match FileStamp::read(&path) {
+        let stamp = match FileStamp::read_for_open(&path) {
             Ok(stamp) => stamp,
             Err(error) => {
-                self.error(owner, error);
+                self.tabs[owner_index].editor.open_error_kind = error.kind();
+                self.error(owner, error.to_string());
                 return;
             }
         };
@@ -439,14 +452,29 @@ impl WorkspaceApp {
         }
         self.active_editor().cancel_vim_input();
         self.folder_dialog_pending = true;
+        self.folder_dialog_generation = self.folder_dialog_generation.wrapping_add(1);
+        let generation = self.folder_dialog_generation;
+        self.folder_dialog_request = Some(generation);
         self.suppress_input = true;
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let path = rfd::FileDialog::new().pick_folder();
-            let _ = tx.send(WorkspaceMessage::Folder(path));
+            let _ = tx.send(WorkspaceMessage::Folder { generation, path });
             ctx.request_repaint();
         });
+    }
+
+    fn close_folder(&mut self) {
+        // A late native-picker result must not reopen a folder after Close.
+        // Keep the outstanding picker reserved until the platform returns it;
+        // repeated close/open must not create multiple native dialogs.
+        self.folder_dialog_generation = self.folder_dialog_generation.wrapping_add(1);
+        self.deferred_project_path = None;
+        self.project.clear_root();
+        // Do not replay input from this button's frame into the active editor.
+        // No tab, document, selection, cursor, or undo state is changed.
+        self.suppress_input = true;
     }
 
     fn request_close(&mut self, id: TabId, ctx: &egui::Context) {
@@ -609,9 +637,16 @@ impl WorkspaceApp {
             tab.editor.poll(ctx);
         }
         self.finish_startup_open(ctx);
-        while let Ok(WorkspaceMessage::Folder(path)) = self.rx.try_recv() {
+        while let Ok(WorkspaceMessage::Folder { generation, path }) = self.rx.try_recv() {
+            if self.folder_dialog_request != Some(generation) {
+                continue;
+            }
+            self.folder_dialog_request = None;
             self.folder_dialog_pending = false;
             self.suppress_input = true;
+            if generation != self.folder_dialog_generation {
+                continue;
+            }
             if let Some(path) = path {
                 self.deferred_project_path = None;
                 self.project.set_root(path);
@@ -655,50 +690,68 @@ impl WorkspaceApp {
 
     fn controls(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
+        let controls_enabled = !self.modal_open() && self.quitting.is_none();
+        // Closing just the browser is safe while a folder picker is pending.
+        // Document dialogs and quitting still block all workspace controls.
+        let close_enabled = self.project.root().is_some()
+            && self.modal_owner().is_none()
+            && self.quitting.is_none();
         egui::Panel::top("workspace_controls").show(root, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open folder…").clicked() {
+                if ui
+                    .add_enabled(controls_enabled, egui::Button::new("Open folder…"))
+                    .clicked()
+                {
                     self.begin_folder_dialog(&ctx);
                 }
-                let theme_label = match self.preferences.theme {
-                    crate::preferences::Theme::Dark => "Light theme",
-                    crate::preferences::Theme::Light => "Dark theme",
-                };
-                if ui.button(theme_label).clicked() {
-                    self.preferences.toggle_theme();
-                    self.preferences.apply_theme(&ctx);
+                if ui
+                    .add_enabled(close_enabled, egui::Button::new("Close Folder"))
+                    .on_hover_text("Close the folder sidebar; keep all open tabs and unsaved edits")
+                    .clicked()
+                {
+                    self.close_folder();
                 }
-                if ui.checkbox(&mut self.vim_enabled, "Vim mode").changed() {
-                    for tab in &mut self.tabs {
-                        tab.editor.cancel_vim_input();
-                        tab.editor.vim_enabled = self.vim_enabled;
-                        tab.editor.vim.reset();
+                ui.add_enabled_ui(controls_enabled, |ui| {
+                    let theme_label = match self.preferences.theme {
+                        crate::preferences::Theme::Dark => "Light theme",
+                        crate::preferences::Theme::Light => "Dark theme",
+                    };
+                    if ui.button(theme_label).clicked() {
+                        self.preferences.toggle_theme();
+                        self.preferences.apply_theme(&ctx);
                     }
-                    self.suppress_input = true;
-                }
-                if ui
-                    .small_button("−")
-                    .on_hover_text("Zoom out · Ctrl/⌘ −")
-                    .clicked()
-                {
-                    self.preferences.font_size =
-                        (self.preferences.font_size - 1.0).max(crate::preferences::MIN_FONT_SIZE);
-                }
-                if ui
-                    .small_button(format!("{} px", self.preferences.font_size.round()))
-                    .on_hover_text("Reset zoom · Ctrl/⌘ 0")
-                    .clicked()
-                {
-                    self.preferences.reset_zoom();
-                }
-                if ui
-                    .small_button("+")
-                    .on_hover_text("Zoom in · Ctrl/⌘ +")
-                    .clicked()
-                {
-                    self.preferences.font_size =
-                        (self.preferences.font_size + 1.0).min(crate::preferences::MAX_FONT_SIZE);
-                }
+                    if ui.checkbox(&mut self.vim_enabled, "Vim mode").changed() {
+                        for tab in &mut self.tabs {
+                            tab.editor.cancel_vim_input();
+                            tab.editor.vim_enabled = self.vim_enabled;
+                            tab.editor.vim.reset();
+                        }
+                        self.suppress_input = true;
+                    }
+                    if ui
+                        .small_button("−")
+                        .on_hover_text("Zoom out · Ctrl/⌘ −")
+                        .clicked()
+                    {
+                        self.preferences.font_size = (self.preferences.font_size - 1.0)
+                            .max(crate::preferences::MIN_FONT_SIZE);
+                    }
+                    if ui
+                        .small_button(format!("{} px", self.preferences.font_size.round()))
+                        .on_hover_text("Reset zoom · Ctrl/⌘ 0")
+                        .clicked()
+                    {
+                        self.preferences.reset_zoom();
+                    }
+                    if ui
+                        .small_button("+")
+                        .on_hover_text("Zoom in · Ctrl/⌘ +")
+                        .clicked()
+                    {
+                        self.preferences.font_size = (self.preferences.font_size + 1.0)
+                            .min(crate::preferences::MAX_FONT_SIZE);
+                    }
+                });
             });
         });
     }
@@ -884,10 +937,10 @@ impl WorkspaceApp {
             self.active_editor().cancel_vim_input();
         }
         let blocked = self.modal_open() || self.quitting.is_some();
+        self.controls(root);
         if blocked {
             root.disable();
         }
-        self.controls(root);
         self.tab_bar(root);
         self.startup_banner(root);
         let mut selected_path = None;
