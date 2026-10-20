@@ -33,11 +33,12 @@ Three real 1 GB fixture families (source, logs, and a giant single line) passed 
 
 Install Rust **1.95.0 or newer**, with the platform's normal Rust linker/build tools. The desktop renderer also needs a working Vulkan, Metal, or Direct3D 12 adapter; a suitable software adapter may be used in headless environments.
 
-For an existing clone, fetch and select this feature branch before building (the earlier `feature/minimal-editor` branch does not include the workspace additions):
+For an existing clone, update the original feature branch before building:
 
 ```sh
 git fetch origin
-git switch feature/file-tabs-vim-mode
+git switch feature/minimal-editor
+git pull --ff-only
 cargo run --locked --release -- path/to/file.rs
 ```
 

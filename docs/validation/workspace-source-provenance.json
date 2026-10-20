@@ -1,8 +1,7 @@
 {
   "date_utc": "2026-10-20",
   "base_commit": "5a3da9686bdd563064d7a17f3de66436f8fac8f7",
-  "implementation_tree": "b74147847ac119e1260e73586b30125bb51e997d",
-  "description": "Implementation tree before documentation and screenshot refresh. GitData publication may change commit metadata but must preserve this implementation tree and all source hashes.",
+  "description": "Source hashes cover the validated workspace implementation including the macOS test-fixture correction. The initial implementation tree is retained for comparison; the correction changes tests only, not runtime code or the measured UI.",
   "sha256": {
     "Cargo.toml": "a778b59edc56731fcbaa827f5ada246113d96541d79515f582189f2424d8b6a5",
     "Cargo.lock": "4089b41b12b9661b093a547bd6c6456649eea77d06ff987edfc866c02639709a",
@@ -16,7 +15,7 @@
     "src/lib.rs": "f4f3f69c60c326dc30920189fd43a658325ed7d924afcf705034c676ae18a39b",
     "src/main.rs": "3d3886ab927422f9bab62adc10f4d0397486752cdc4fa0d663752d25a0c6497a",
     "src/preferences.rs": "ae5263000b76591d41cbdf2d5c856a44beaea207b9cd67f4a7ab441beca88f8b",
-    "src/project_tree.rs": "d9cf1f7801105858ae4f8985a7616815c1bfd4c596c11fbd27ab7ab4c83b1f35",
+    "src/project_tree.rs": "ea6931e70418eff5f04043a73b7cbb4d0d002d8610c36ace86779cffc4ed37ee",
     "src/search.rs": "e5d50157ee064faab875cd94b849c3560c66bbb8477ccb29001b0717f4ad1952",
     "src/syntax.rs": "69d41896a4c01c6600b6e23243715212a967cd4d548234486b67753ff171fbeb",
     "src/view.rs": "9f54d4b9ba6bcf95bfe7c017dcf7cf4d404535f2f744407c61b862c0c99e7954",
@@ -27,7 +26,7 @@
     "tests/large_file.rs": "48aa5693960cbb722ecb0adb3efc48536450bcd6229816766c4df620e6c931b9"
   },
   "checks": {
-    "default_features_passed": 172,
+    "default_features_passed": 173,
     "default_features_ignored_expensive_opt_ins": 3,
     "no_default_features_passed": 88,
     "no_default_features_ignored_expensive_opt_ins": 3,
@@ -35,5 +34,6 @@
     "format": "pass",
     "strict_clippy": "pass",
     "build": "pass"
-  }
+  },
+  "initial_implementation_tree": "b74147847ac119e1260e73586b30125bb51e997d"
 }

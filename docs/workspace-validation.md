@@ -1,6 +1,6 @@
 # Workspace feature validation — 2026-10-20
 
-This records the `feature/file-tabs-vim-mode` implementation, based on `5a3da9686bdd563064d7a17f3de66436f8fac8f7`. It is targeted prototype validation, not full Vim compatibility, v1 acceptance, or a cross-platform performance guarantee.
+This records the workspace updates on `feature/minimal-editor`, based on `5a3da9686bdd563064d7a17f3de66436f8fac8f7`. It is targeted prototype validation, not full Vim compatibility, v1 acceptance, or a cross-platform performance guarantee.
 
 ## Automated checks
 
@@ -8,12 +8,12 @@ The final Linux checks passed:
 
 - `cargo fmt --all -- --check`.
 - `cargo clippy --locked --all-targets -- -D warnings`.
-- `cargo test --locked --all-targets`: **172 passed**, zero failures; three expensive opt-ins ignored. This includes 83 core unit tests, 84 desktop/UI tests, one randomized regression and four real-file integration tests.
+- `cargo test --locked --all-targets`: **173 passed**, zero failures; three expensive opt-ins ignored. This includes 83 core unit tests, 85 desktop/UI tests, one randomized regression and four real-file integration tests.
 - `cargo test --locked --no-default-features --all-targets`: **88 passed**, zero failures, the same three opt-ins ignored.
 - `cargo test --locked --doc`: command passed; no doctests are present.
 - `cargo build --locked`.
 
-An independent test pass added **42 workspace regression tests** and reran the full 172-test suite. This is included in the totals above, not another set of 172 distinct tests. Source hashes and the implementation tree are recorded in [provenance](validation/workspace-source-provenance.json); the [sanitized command log](validation/workspace-final-checks.log) records the final checks.
+An independent test pass added **42 workspace regression tests** and reran the original 172-test suite. The portability correction adds one Linux regression, bringing the final local total to 173; these are not repeated counts of distinct tests. Source hashes and the implementation tree are recorded in [provenance](validation/workspace-source-provenance.json); the [sanitized command log](validation/workspace-final-checks.log) records the final checks.
 
 ### Feature and safety coverage
 
@@ -52,7 +52,7 @@ This probe does not save the large fixture. The earlier three-family 1 GB byte-e
 
 ## Cross-platform and remaining qualification
 
-The existing three-OS Actions workflow applies to this branch and includes formatting, strict linting, tests, build and an actual native-window smoke test. At the time this record was prepared, **the new branch had not yet run hosted CI**. Consult [Actions](https://github.com/Linn39403/SimpTxt/actions) for its result. The [earlier baseline run](https://github.com/Linn39403/SimpTxt/actions/runs/39381414868) passed on Linux, Windows and macOS; that is not evidence for this changed source.
+The existing three-OS Actions workflow applies to this branch and includes formatting, strict linting, tests, build and an actual native-window smoke test. The first hosted run passed Linux and Windows, including native smoke, but found a macOS-only test-fixture assumption: APFS rejects invalid-UTF-8 filenames. The correction separates an in-memory Unix raw-path identity test from the Linux filesystem regression, retaining strict filesystem assertions without pretending that macOS accepts those filenames. The corrected source is being checked on all three platforms; consult [Actions](https://github.com/Linn39403/SimpTxt/actions) for the final run. The [earlier baseline run](https://github.com/Linn39403/SimpTxt/actions/runs/39381414868) passed on Linux, Windows and macOS; that is not evidence for this changed source.
 
 The local executor cannot create display-server sockets, so its successful offscreen checks do not establish native-window or OS-input success. Native dialogs, platform IME, accessibility, grapheme/bidi navigation, sustained latency, Windows filesystem identity races and all unusual filesystems still need broader hands-on testing.
 

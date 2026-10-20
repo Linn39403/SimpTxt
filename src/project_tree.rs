@@ -1124,17 +1124,41 @@ mod tests {
     #[test]
     fn lossy_display_names_do_not_change_raw_path_identity() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        // Unix paths can contain invalid UTF-8 in memory even when the host
+        // filesystem (such as APFS on macOS) rejects those filenames.
+        let root = PathBuf::from("/project");
+        let a = entry(root.join(OsString::from_vec(vec![b'a', 0x80])));
+        let b = entry(root.join(OsString::from_vec(vec![b'a', 0x81])));
+        assert_eq!(a.display_name, b.display_name);
+        assert_ne!(a.path, b.path);
+
+        let mut tree = ProjectTree::new();
+        tree.set_root(root);
+        for item in [a, b] {
+            tree.perform(Action::Select(item.path.clone()));
+            assert_eq!(tree.pending_selection, Some(item.path));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_utf8_filenames_preserve_listing_and_selection_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        // Linux CI supports invalid UTF-8 filenames, so also exercise the
+        // actual filesystem listing and selection without ignoring I/O errors.
         let temp = tempfile::tempdir().unwrap();
         let a = temp.path().join(OsString::from_vec(vec![b'a', 0x80]));
         let b = temp.path().join(OsString::from_vec(vec![b'a', 0x81]));
         fs::write(&a, b"a").unwrap();
         fs::write(&b, b"b").unwrap();
         let listing = read_directory(temp.path(), temp.path(), PAGE_ENTRIES, &|| true).unwrap();
+        assert_eq!(listing.entries.len(), 2);
         assert_eq!(
             listing.entries[0].display_name,
             listing.entries[1].display_name
         );
-        assert_ne!(listing.entries[0].path, listing.entries[1].path);
+        assert_eq!(listing.entries[0].path, a);
+        assert_eq!(listing.entries[1].path, b);
         assert_eq!(verify_selection(temp.path(), &a, &|| true).unwrap(), a);
         assert_eq!(verify_selection(temp.path(), &b, &|| true).unwrap(), b);
     }
