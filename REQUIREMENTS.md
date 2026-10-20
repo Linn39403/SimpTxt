@@ -20,7 +20,16 @@ Requirement origins:
 
 ### Non-goals for v1
 
-No IDE features, AI, plugin system, embedded terminal, project-wide indexing, language servers, debugging, or build integration. Do not add feature breadth at the expense of the core file-editing workflow. Tabs, sessions, themes, and other convenience features are not release requirements.
+No IDE features, AI, plugin system, embedded terminal, project-wide indexing, language servers, debugging, or build integration. Do not add feature breadth at the expense of the core file-editing workflow. Session restoration and unrelated convenience features are not release requirements. The follow-on features below were explicitly requested after the first implementation; they do not introduce IDE/project indexing scope.
+
+### Follow-on requirements (user-approved 2026-10-20)
+
+- **S-05 [User]: Multiple files.** Keep opened files in separate tabs with independent edits, undo history, cursor/selection, scroll state, paths, background work, and modified indicators. Switching tabs must not replace content. Warn on unsaved close/quit; duplicate opens must not create divergent buffers for one file.
+- **S-06 [User]: Optional Vim mode.** Offer a clearly labeled, optional Vim-style subset including Normal, Insert, and Visual editing. Document precisely which commands are implemented; unsupported commands must not mutate content or claim full compatibility. Native dialogs and search fields retain normal input behavior.
+- **S-07 [User]: Open Folder.** Provide a collapsible project-file sidebar. List directories lazily and asynchronously, with bounded work and no recursive whole-project scan. Selecting a file opens or focuses its tab. Changing the folder never discards documents. File rename/delete and project indexing remain out of scope.
+- **S-08 [User]: Editor zoom.** Support Ctrl +, Ctrl −, and Ctrl + mouse wheel. **[Derived, agreed]:** Ctrl 0 resets. Zoom must work in Vim modes without typing into or dirtying files; row geometry, caret placement and hit testing must follow the font size.
+- **S-09 [User]: Themes.** Provide dark and light modes, with consistent editor, syntax, caret, selection, gutter, tabs, sidebar and dialog colors. Theme switches must preserve document and editing state.
+- **S-10 [User]: Matching pairs.** Highlight caret-adjacent matching parentheses, brackets and braces with nesting. Use reliable source lexical state to exclude comments/strings; report unknown rather than guessing when syntax or a bounded search budget is insufficient. No automatic delimiter insertion is requested.
 
 ## 2. Core behavior
 

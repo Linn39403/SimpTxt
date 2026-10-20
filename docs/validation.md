@@ -1,5 +1,7 @@
 # Prototype validation — 2026-10-20
 
+These measurements describe the original `feature/minimal-editor` implementation published at `5a3da9686bdd563064d7a17f3de66436f8fac8f7`. See [workspace validation](workspace-validation.md) for the later tabs/Vim/sidebar/theme changes. The original source hashes and logs below are retained as historical evidence, not rerun results for the new branch.
+
 This is evidence for the first implementation, not v1 acceptance or a performance guarantee. The complete acceptance matrix in [REQUIREMENTS.md](../REQUIREMENTS.md), including 20-trial warm/cold p95 measurements and hands-on validation on each supported OS, is still outstanding.
 
 ## Environment and method
