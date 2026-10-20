@@ -1,0 +1,20 @@
+RUN family=logs actual_fixture_bytes=1000000000 trials=1 cache=uncontrolled_generated_fixture measurements=core_not_UI no_percentile_claim=true
+METRIC family=logs fixture_bytes=1000000000 case=first_preview_read elapsed_ns=35013 bytes=4096 decimal_MB_per_s=116.985
+METRIC family=logs fixture_bytes=1000000000 case=full_load elapsed_ns=2686671336 bytes=1000000000 decimal_MB_per_s=372.208
+METRIC family=logs fixture_bytes=1000000000 case=editing_ready_since_open elapsed_ns=2687134070 bytes=1000000000 decimal_MB_per_s=372.144
+METRIC family=logs fixture_bytes=1000000000 case=noop_save elapsed_ns=400347803 bytes=1000000000 decimal_MB_per_s=2497.828
+METRIC family=logs fixture_bytes=1000000000 case=edit_end elapsed_ns=44008469 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=edit_middle elapsed_ns=413089 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=edit_beginning elapsed_ns=137516 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=121483 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=117786 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=112058 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=128333 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=118488 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=110326 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=save_cancellation_acknowledgment elapsed_ns=322404 bytes=0 decimal_MB_per_s=0.000
+METRIC family=logs fixture_bytes=1000000000 case=cancelled_save_total elapsed_ns=1606990 bytes=524306 decimal_MB_per_s=326.266
+METRIC family=logs fixture_bytes=1000000000 case=edited_save elapsed_ns=474548968 bytes=1000000035 decimal_MB_per_s=2107.264
+METRIC family=logs fixture_bytes=1000000000 case=reopen_edited_file elapsed_ns=709798814 bytes=1000000035 decimal_MB_per_s=1408.850
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 7.30s
+PROCESS exit=0 wall_s=7.320 peak_child_rss_kib=980708 user_s=2.289 system_s=5.022

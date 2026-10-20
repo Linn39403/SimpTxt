@@ -1,0 +1,27 @@
+{
+  "date_utc": "2026-10-20",
+  "implementation_commit": "31527ef449b1fc09eb5693d1ae4a38010b27aef5",
+  "sha256": {
+    "Cargo.toml": "6e5ce7e418f9ee2fe8562f8aaf7d04240991a17f8b4ed92e13c0b41f93865eb5",
+    "Cargo.lock": "ae3d27cf2ff25d365137d35cb1c06b8e55ee111b15abf08a7012845fb1f6c8bd",
+    "src/app.rs": "5ba119568ed9b598f7a559f6b875f588375f0d8ff5e2c01b2bf3ac1c502bc1ea",
+    "src/app_safety_tests.rs": "03c87038d7fa85bc7851bb60ffa7c8b67cae365f0292bd90b988cdca1139bf94",
+    "src/document.rs": "65b329502dcfd004b068aed8cddf6f0406b19f1ba927cc2cb553006ae9a15118",
+    "src/file_io.rs": "62a16ed4bd2c8e558739366afdc7f16103fab10e3860700973909e2c1066d097",
+    "src/headless.rs": "ed2a620cdab9d48e2a68eefd3d48f262e5a6f6bbfbba9cc7526ee80123f12aaf",
+    "src/lib.rs": "963f0b0fb523a3d9ba8743ac3ef9b96da61764fa27bf0bc73af9c9927777f840",
+    "src/main.rs": "5e432964cea6bddde02faaa3f3b8bcaa4d72d96da1be92f2cf8e82c405c120d4",
+    "src/search.rs": "e5d50157ee064faab875cd94b849c3560c66bbb8477ccb29001b0717f4ad1952",
+    "src/syntax.rs": "69d41896a4c01c6600b6e23243715212a967cd4d548234486b67753ff171fbeb",
+    "src/view.rs": "9f54d4b9ba6bcf95bfe7c017dcf7cf4d404535f2f744407c61b862c0c99e7954",
+    "tests/document_randomized.rs": "16fd2eb09a33182d7fc082f622ecf3d606ed1daa3404cceef7b3b7772de29969",
+    "tests/large_file.rs": "48aa5693960cbb722ecb0adb3efc48536450bcd6229816766c4df620e6c931b9",
+    "scripts/generate_fixtures.py": "7323b096b5035e56b7498f3868a25116a86851cafc02d8e87cf97742524cdc41",
+    "examples/welcome.rs": "fa691fac99a9dcc3589ce477577b7560e3f58610a6243afd77ec6b557707248d"
+  },
+  "notes": [
+    "Final checks and final 1 GB offscreen probe use these source contents.",
+    "Core 10 MB, 100 MB and 1 GB file-pipeline measurements used these core and test sources with the release profile; subsequent GUI-only fixes and dev-package optimization do not change release core behavior.",
+    "Earlier UI runs precede the final lint-only modulo expression change; the first unoptimized run also precedes the corrected gutter and clean-undo status. No speedup or percentile is inferred from comparisons."
+  ]
+}

@@ -1,6 +1,6 @@
 # SimpTxt Requirements
 
-Status: initial v1 requirements. License, implementation language, and UI framework are undecided.
+Status: v1 requirements, not a claim of completed acceptance. The first implementation uses Rust with egui/eframe and wgpu; this is an implementation decision, not a universal requirement. The license remains undecided.
 
 ## 1. Goal and scope
 
@@ -96,4 +96,6 @@ Also test external modification, save failure, disk exhaustion, interrupted savi
 2. **Core editor:** finish the minimal file workflow, search/replace, supported text behavior, and visible-first correct highlighting.
 3. **Application polish:** keyboard behavior, simple UI, packaging, cross-platform validation, and contributor documentation.
 
-Open decisions: open-source license; implementation language, including Rust versus C++; UI framework; initial syntax languages; supported OS versions; reference hardware; and measured performance/memory budgets. No license or framework is selected by this document.
+Implementation decisions for the current prototype: Rust; egui/eframe with wgpu; a chunked piece-table core and viewport-only rendering. Initial syntax modes are Rust, C/C++, JSON, and plain text, with conservative plain-text fallback for unsupported lexical constructs. See README.md for the implemented scope and current limitations.
+
+Open decisions and acceptance work: open-source license; supported OS versions; reference hardware; and measured performance/memory budgets. Cross-platform builds and the full 20-trial acceptance matrix remain separate validation work; targeted prototype tests do not establish v1 acceptance.
