@@ -1,0 +1,59 @@
+{
+  "generator": "scripts/generate_fixtures.py",
+  "fixtures": [
+    {
+      "family": "source",
+      "bytes": 10000000,
+      "sha256": "685cb4140981398c35422f239a0b7d7ac66f1e8488ebad78f9dc8b30f2169687",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "source",
+      "bytes": 100000000,
+      "sha256": "40b0b6a607cdcda6b3c889e586e9ce153f9540ea27b51989e2183e3452bd7a17",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "source",
+      "bytes": 1000000000,
+      "sha256": "0980cd658beeb8619bd6e8cb4932c6915680c1ae821356f552643e962576d034",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "logs",
+      "bytes": 10000000,
+      "sha256": "eb7dbb5d2f9c0bce442b110f3f405fcb8d669fc8ef9639c68467c13b8b907aec",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "logs",
+      "bytes": 100000000,
+      "sha256": "abf0df09aaedb6b2b70673a42d2c0c61e4ff2f2ef76f45a33d26b427c5419b30",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "logs",
+      "bytes": 1000000000,
+      "sha256": "1a6af08545879bfc3e401ce5c3de0ad1bb86a3b0437d43e64aea2ee8bc84e6fb",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "long",
+      "bytes": 10000000,
+      "sha256": "33b3dd7e58a2e6c0efc4d1e3289ee2effb55ba4c71e4131f62e111826d9a22a1",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "long",
+      "bytes": 100000000,
+      "sha256": "89c0981ec491c1d9a4213092e9d793cdeba7d896e6eb2d747a174bc30ffe2cb8",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    },
+    {
+      "family": "long",
+      "bytes": 1000000000,
+      "sha256": "4dcb0918a74205d2ff2f112dac3bdf6e8ee75d3897f1218cf0bcf181618a8903",
+      "method": "streamed deterministic generator; complete real-file pipelines separately byte-verified"
+    }
+  ]
+}

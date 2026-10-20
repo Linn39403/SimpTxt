@@ -1,0 +1,344 @@
++ cargo fmt --all -- --check
++ cargo clippy --locked --all-targets -- -D warnings
+    Checking simptxt v0.1.0 (<repository>)
+    Finished `dev` profile [unoptimized] target(s) in 1.37s
++ cargo test --locked --all-targets
+   Compiling simptxt v0.1.0 (<repository>)
+    Finished `test` profile [unoptimized] target(s) in 3.73s
+     Running unittests src/lib.rs (target/debug/deps/simptxt-a7a402206f438ef1)
+
+running 83 tests
+test brackets::tests::caret_prefers_right_bracket_and_can_match_the_immediate_left ... ok
+test brackets::tests::all_delimiters_match_in_both_directions_with_mixed_nesting ... ok
+test brackets::tests::a_prefix_can_prove_a_pair_but_never_guess_beyond_its_extent ... ok
+test brackets::tests::plain_text_does_not_infer_string_or_comment_syntax ... ok
+test brackets::tests::ready_more_complete_and_stale_highlighting_invalidate_cached_results ... ok
+test brackets::tests::mismatched_nesting_and_unmatched_brackets_do_not_form_pairs ... ok
+test brackets::tests::line_comments_and_multiline_lexical_state_are_respected ... ok
+test brackets::tests::source_requires_current_matching_language_index ... ok
+test brackets::tests::unchanged_frames_hit_cache_and_edits_cursor_and_language_invalidate ... ok
+test brackets::tests::strings_comments_characters_and_raw_strings_are_excluded ... ok
+test brackets::tests::utf8_bom_crlf_and_invalid_carets_are_safe_and_unchanged ... ok
+test document::tests::empty_replacement_and_insertions_at_both_ends ... ok
+test document::tests::byte_exact_bom_crlf_mixed_endings_and_final_newline ... ok
+test document::tests::failed_or_cancelled_bulk_edits_are_atomic ... ok
+test document::tests::invalid_utf8_never_enters_document ... ok
+test document::tests::generated_edits_match_string_reference_and_restore_exactly ... ok
+test document::tests::empty_and_clamped_access ... ok
+test document::tests::compact_builder_cancels_between_bounded_writes ... ok
+test document::tests::prepared_snapshot_adoption_is_one_undo_action ... ok
+test document::tests::projected_size_checks_boundary_underflow_and_overflow_without_allocation ... ok
+test document::tests::oversized_shared_chunk_input_is_rejected_before_indexing ... ok
+test document::tests::rejects_invalid_edit_ranges_without_changing_state ... ok
+test document::tests::replace_ranges_is_one_undo_transaction_with_original_coordinates ... ok
+test document::tests::oversized_bulk_expansion_is_rejected_before_allocating_output ... ok
+test document::tests::unchanged_chunk_storage_is_shared_across_edits_and_snapshots ... ok
+test brackets::tests::exact_budget_boundary_is_inclusive_but_long_lines_are_bounded ... ok
+test document::tests::repairs_codepoint_at_target_chunk_size ... ok
+test document::tests::undo_redo_and_background_saved_revision ... ok
+test document::tests::utf8_crosses_every_input_boundary ... ok
+test file_io::size_limit_tests::oversized_file_is_rejected_before_reading_or_allocating_it ... ok
+test file_io::tests::cancellation_before_or_during_save_retains_original ... ok
+test file_io::tests::create_new_detects_a_destination_created_during_writing ... ok
+test file_io::tests::create_new_never_overwrites_an_existing_destination ... ok
+test file_io::tests::directory_permission_failure_preserves_original_when_enforced ... ok
+test file_io::tests::empty_file_loads_and_saves ... ok
+test file_io::tests::file_permissions_survive_replacement ... ok
+test file_io::tests::incomplete_write_cannot_be_reported_as_a_successful_save ... ok
+test file_io::tests::external_change_before_or_during_save_is_not_overwritten ... ok
+test file_io::tests::invalid_utf8_nul_and_incomplete_utf8_are_read_only_errors ... ok
+test file_io::tests::no_op_save_preserves_bom_and_mixed_line_endings_exactly ... ok
+test file_io::tests::preview_is_bounded_and_omits_trailing_partial_character ... ok
+test file_io::tests::removed_destination_is_not_silently_recreated ... ok
+test file_io::tests::simulated_disk_exhaustion_after_partial_write_retains_original ... ok
+test file_io::tests::symlink_load_preview_and_save_are_rejected ... ok
+test search::tests::cancelled_search_and_empty_pattern_are_errors ... ok
+test brackets::tests::large_unicode_windows_and_partial_index_ends_keep_nearby_pairs ... ok
+test document::tests::history_is_limited_and_snapshots_have_no_history ... ok
+test search::tests::find_all_is_non_overlapping_and_utf8_preserving ... ok
+test search::tests::finds_across_piece_boundaries ... ok
+test search::tests::forward_backward_and_explicit_bounds ... ok
+test search::tests::handles_repeated_prefixes_without_missing_matches ... ok
+
+running 1 test
+test search::tests::replaces_in_snapshot_without_mutating_original ... ok
+test file_io::tests::interrupted_save_process_keeps_original ... ok
+test syntax::tests::c_comments_do_not_nest_and_raw_strings_are_multiline ... ok
+test syntax::tests::c_preprocessor_hazards_explicitly_fall_back ... ok
+test syntax::tests::escaped_quote_across_checkpoint_does_not_end_string ... ok
+test syntax::tests::json_has_no_comment_syntax ... ok
+test file_io::tests::utf8_across_every_chunk_boundary_is_preserved ... ok
+test syntax::tests::nested_rust_comments_and_raw_strings ... ok
+test syntax::tests::raw_delimiter_and_escape_can_cross_checkpoint ... ok
+test syntax::tests::recognizes_extensions_without_claiming_unknown_languages ... ok
+test syntax::tests::rust_characters_lifetimes_and_raw_identifiers ... ok
+test syntax::tests::rust_keywords_comments_strings_numbers ... ok
+test syntax::tests::maximum_rust_raw_delimiter_crosses_read_block ... ok
+test syntax::tests::stale_partial_cancelled_and_oversized_indexes_fall_back ... ok
+test syntax::tests::c_line_splice_across_scan_block_is_detected ... ok
+test syntax::tests::state_crosses_checkpoints_and_scan_blocks ... ok
+test vim::tests::empty_buffers_and_line_ends_are_safe ... ok
+test vim::tests::line_operations_preserve_endings_and_register_payload ... ok
+test vim::tests::open_and_paste_plans_preserve_bom_crlf ... ok
+test vim::tests::parser_counts_operators_and_cancellation ... ok
+test vim::tests::parser_modes_and_commands ... ok
+test vim::tests::unicode_bom_crlf_and_horizontal_limits ... ok
+test vim::tests::vertical_movement_uses_scalar_columns ... ok
+test vim::tests::word_motions_and_operator_endpoints ... ok
+test document::tests::bulk_compaction_keeps_utf8_and_newline_indices_valid ... ok
+test search::tests::match_limit_is_an_error_not_a_partial_result ... ok
+test vim::tests::arbitrary_offsets_never_split_utf8_crlf_or_bom ... ok
+test syntax::tests::arbitrary_viewports_match_full_document_highlighting ... ok
+test vim::tests::bounded_work_refuses_long_word_and_large_payload ... ok
+test document::tests::dense_line_checkpoints_are_sparse_shared_and_survive_slices ... ok
+test document::tests::million_match_replacement_streams_to_a_few_chunks_before_commit ... ok
+test document::tests::sequential_typing_coalesces_locally_and_remains_undoable ... ok
+
+test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running unittests src/main.rs (target/debug/deps/simptxt-09a5c6e5fa7cf473)
+
+running 85 tests
+test app::safety_tests::save_as_language_change_invalidates_queued_old_syntax ... ok
+test app::safety_tests::obsolete_search_results_never_clear_or_apply_over_newer_job ... ok
+test app::safety_tests::destructive_request_discards_queued_replace_all_before_confirmation ... ok
+test app::safety_tests::obsolete_highlight_messages_do_not_clear_current_worker ... ok
+test app::safety_tests::failed_save_retains_unsaved_document_and_pending_choice ... ok
+test app::safety_tests::ime_composition_owns_enter_and_navigation_until_commit ... ok
+test app::safety_tests::saved_snapshot_does_not_mark_newer_edits_clean_or_discard_them ... ok
+test app::safety_tests::empty_native_input_does_not_delete_the_selection ... ok
+test app::safety_tests::modal_windows_and_native_dialogs_block_editor_mutations ... ok
+test app::safety_tests::undo_to_saved_revision_updates_visible_status ... ok
+test app::tests::deleting_selection_with_empty_replace_is_valid ... ok
+test app::safety_tests::search_result_for_old_revision_keeps_new_edits ... ok
+test app::tests::dirty_replacement_requires_explicit_choice ... ok
+test app::tests::keyboard_edit_select_cut_paste_undo ... ok
+test app::safety_tests::undo_cursor_does_not_split_crlf_before_delete ... ok
+test app::safety_tests::text_newline_events_do_not_duplicate_enter ... ok
+test app::tests::undo_never_leaves_cursor_inside_multibyte_character ... ok
+test app::tests::readonly_preview_rejects_every_mutation ... ok
+test app::workspace::regression_tests::cancel_quit_after_first_discard_keeps_every_document ... ok
+test app::workspace::regression_tests::cancel_dirty_close_keeps_all_tabs_and_undo_histories ... ok
+test app::workspace::regression_tests::bracket_cache_follows_syntax_completion_and_edit_invalidation ... ok
+test app::workspace::regression_tests::close_saving_tab_and_native_dialog_owner_are_not_removed ... ok
+test app::workspace::regression_tests::close_loading_tab_cancels_jobs_and_late_completion_cannot_reach_replacement ... ok
+test app::workspace::regression_tests::failed_save_during_quit_keeps_prompt_and_every_tab ... ok
+test app::workspace::regression_tests::inactive_highlight_completion_does_not_touch_active_worker ... ok
+test app::workspace::regression_tests::inactive_loaded_result_keeps_both_documents_and_selection_separate ... ok
+test app::workspace::regression_tests::inactive_search_and_replacement_finish_only_in_their_owner ... ok
+test app::workspace::regression_tests::inactive_save_completion_marks_only_origin_revision_clean ... ok
+test app::workspace::regression_tests::existing_hard_link_focuses_original_but_symlink_is_not_silently_followed ... ok
+test app::workspace::regression_tests::quit_waits_for_inactive_save_and_failure_cannot_close_window ... ok
+test app::workspace::regression_tests::quitting_cancels_every_tab_search_and_rejects_already_queued_replace_all ... ok
+test app::workspace::regression_tests::real_files_open_in_separate_tabs_and_duplicate_path_focuses_owner ... ok
+test app::workspace::regression_tests::quit_approval_is_specific_to_the_approved_revision ... ok
+test app::workspace::regression_tests::reload_resource_refusals_preserve_dirty_bytes_revision_and_undo ... ok
+test app::workspace::regression_tests::save_as_dialog_reply_keeps_original_owner_after_tab_switch ... ok
+test app::workspace::regression_tests::save_as_rejects_open_loading_saving_and_overwrite_destinations ... ok
+test app::workspace::regression_tests::saving_old_snapshot_during_quit_does_not_approve_newer_edits ... ok
+test app::workspace::regression_tests::reload_instead_of_quit_save_cancels_quit_without_stranding_other_tabs ... ok
+test app::workspace::regression_tests::tab_switch_preserves_independent_cursor_selection_view_and_undo ... ok
+test app::workspace::regression_tests::tab_limit_rejects_new_and_open_without_replacing_clean_or_dirty_tabs ... ok
+test app::workspace::regression_tests::vim_insert_ime_is_single_undo_and_does_not_duplicate_enter ... ok
+test app::workspace::regression_tests::vim_key_and_text_pairs_execute_printable_commands_exactly_once ... ok
+test app::workspace::regression_tests::vim_normal_ime_paste_cut_and_unfocused_text_never_edit ... ok
+test app::workspace::regression_tests::vim_quit_requests_confirmation_and_force_quit_only_closes_owner ... ok
+test app::workspace::regression_tests::vim_readonly_and_modal_states_block_all_command_mutations ... ok
+test app::workspace::regression_tests::vim_register_and_visual_selection_belong_to_their_tab ... ok
+test app::workspace::regression_tests::vim_tab_switch_cancels_operator_count_composition_and_insert_mode ... ok
+test app::workspace::regression_tests::vim_visual_copy_includes_one_or_two_unicode_characters_without_mutation ... ok
+test app::workspace::regression_tests::vim_write_quit_failure_retains_tab_and_current_document ... ok
+test app::workspace::regression_tests::vim_x_at_last_character_or_empty_line_never_eats_crlf ... ok
+test app::workspace::regression_tests::vim_x_dd_and_p_preserve_utf8_bom_crlf_and_final_newline_choice ... ok
+test app::workspace::regression_tests::window_focus_loss_resets_vim_command_prefix_and_composition ... ok
+test app::workspace::regression_tests::bracket_pair_caches_are_tab_local_and_never_change_bytes_or_undo ... ok
+test preferences::tests::both_palettes_and_row_geometry_change_without_ui_scaling ... ok
+test preferences::tests::control_wheel_zooms_both_directions_without_scrolling ... ok
+test app::workspace::regression_tests::control_tab_and_close_shortcuts_cannot_insert_printable_text_or_tabs ... ok
+test app::workspace::regression_tests::external_widget_focus_blocks_editor_text_and_delete_but_not_global_zoom ... ok
+test project_tree::tests::cancelled_work_stops_before_and_during_listing ... ok
+test project_tree::tests::changing_root_cancels_and_rejects_stale_results ... ok
+test project_tree::tests::collapsed_folder_does_not_reappear_when_result_arrives ... ok
+test project_tree::tests::expanded_directory_count_is_bounded ... ok
+test app::workspace::regression_tests::folder_change_discards_queued_old_root_sidebar_selection ... ok
+test project_tree::tests::invalid_utf8_filenames_preserve_listing_and_selection_paths ... ok
+test preferences::tests::keyboard_zoom_consumes_shortcut_text_without_global_zoom ... ok
+test project_tree::tests::links_are_disabled_and_parent_replacement_cannot_bypass_checks ... ok
+test project_tree::tests::listing_does_not_read_descendants_and_sorts_folders_first ... ok
+test project_tree::tests::lossy_display_names_do_not_change_raw_path_identity ... ok
+test project_tree::tests::new_click_and_new_root_discard_old_selection ... ok
+test project_tree::tests::permission_error_is_visible_and_retryable ... ok
+test project_tree::tests::listing_is_bounded_and_load_more_is_honest ... ok
+test project_tree::tests::real_read_error_can_recover_after_directory_appears ... ok
+test project_tree::tests::request_id_mismatch_does_not_release_or_replace_current_job ... ok
+test app::workspace::regression_tests::theme_change_and_new_tab_keep_existing_bytes_revisions_and_zoom ... ok
+test preferences::tests::zoom_clamps_repeated_commands_and_retains_unrelated_input ... ok
+test project_tree::tests::selection_requires_regular_file_and_stays_inside_root ... ok
+test view::tests::bom_and_crlf_are_not_cursor_targets ... ok
+test app::tests::egui_renders_only_bounded_viewport_and_unicode ... ok
+test view::tests::viewport_respects_unicode_and_long_lines ... ok
+test project_tree::tests::result_application_enforces_per_directory_and_total_cache_caps ... ok
+test project_tree::tests::real_listing_never_exceeds_hard_per_directory_limit ... ok
+test project_tree::tests::worker_delivers_selection_once_through_render ... ok
+test app::workspace::regression_tests::queued_sidebar_selection_waits_during_quit_even_without_a_modal ... ok
+test project_tree::tests::full_cache_renders_only_a_viewport_of_rows_in_both_themes ... ok
+test app::workspace::regression_tests::zoom_events_do_not_type_scroll_select_dirty_or_join_undo_history ... ok
+test app::workspace::regression_tests::queued_sidebar_selection_waits_for_modal_to_close_then_opens_only_once ... ok
+
+test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/document_randomized.rs (target/debug/deps/document_randomized-05834603546f73a0)
+
+running 1 test
+test randomized_chunk_validation_edits_and_undo_roundtrip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/large_file.rs (target/debug/deps/large_file-5a1a6e2b60181be0)
+
+running 7 tests
+test hundred_megabyte_all_families_open_edit_save ... ignored, opt-in 100 MB real-file fixtures; use --ignored --exact
+test one_gigabyte_open_edit_save ... ignored, writes a real 1,000,000,000-byte fixture; needs about 2 GB free disk
+test ten_megabyte_all_families_open_edit_save ... ignored, opt-in 10 MB real-file fixtures; use --ignored --exact
+test one_megabyte_single_line_open_edit_save ... ok
+test one_megabyte_logs_open_edit_save ... ok
+test one_megabyte_source_open_edit_save ... ok
+test fixture_tail_and_streaming_edit_oracle_are_valid ... ok
+
+test result: ok. 4 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests examples/welcome.rs (target/debug/examples/welcome-119a83c2c72ec7ea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
++ cargo test --locked --no-default-features --all-targets
+    Finished `test` profile [unoptimized] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/simptxt-eeaeb0cc31bee50b)
+
+running 83 tests
+test brackets::tests::all_delimiters_match_in_both_directions_with_mixed_nesting ... ok
+test brackets::tests::a_prefix_can_prove_a_pair_but_never_guess_beyond_its_extent ... ok
+test brackets::tests::mismatched_nesting_and_unmatched_brackets_do_not_form_pairs ... ok
+test brackets::tests::caret_prefers_right_bracket_and_can_match_the_immediate_left ... ok
+test brackets::tests::plain_text_does_not_infer_string_or_comment_syntax ... ok
+test brackets::tests::source_requires_current_matching_language_index ... ok
+test brackets::tests::strings_comments_characters_and_raw_strings_are_excluded ... ok
+test brackets::tests::unchanged_frames_hit_cache_and_edits_cursor_and_language_invalidate ... ok
+test brackets::tests::utf8_bom_crlf_and_invalid_carets_are_safe_and_unchanged ... ok
+test document::tests::byte_exact_bom_crlf_mixed_endings_and_final_newline ... ok
+test brackets::tests::line_comments_and_multiline_lexical_state_are_respected ... ok
+test brackets::tests::ready_more_complete_and_stale_highlighting_invalidate_cached_results ... ok
+test document::tests::empty_and_clamped_access ... ok
+test document::tests::failed_or_cancelled_bulk_edits_are_atomic ... ok
+test document::tests::empty_replacement_and_insertions_at_both_ends ... ok
+test document::tests::generated_edits_match_string_reference_and_restore_exactly ... ok
+test document::tests::invalid_utf8_never_enters_document ... ok
+test document::tests::compact_builder_cancels_between_bounded_writes ... ok
+test document::tests::prepared_snapshot_adoption_is_one_undo_action ... ok
+test document::tests::projected_size_checks_boundary_underflow_and_overflow_without_allocation ... ok
+test document::tests::rejects_invalid_edit_ranges_without_changing_state ... ok
+test brackets::tests::exact_budget_boundary_is_inclusive_but_long_lines_are_bounded ... ok
+test document::tests::oversized_shared_chunk_input_is_rejected_before_indexing ... ok
+test document::tests::replace_ranges_is_one_undo_transaction_with_original_coordinates ... ok
+test document::tests::unchanged_chunk_storage_is_shared_across_edits_and_snapshots ... ok
+test document::tests::undo_redo_and_background_saved_revision ... ok
+test document::tests::utf8_crosses_every_input_boundary ... ok
+test file_io::size_limit_tests::oversized_file_is_rejected_before_reading_or_allocating_it ... ok
+test file_io::tests::cancellation_before_or_during_save_retains_original ... ok
+test file_io::tests::create_new_detects_a_destination_created_during_writing ... ok
+test file_io::tests::create_new_never_overwrites_an_existing_destination ... ok
+test file_io::tests::directory_permission_failure_preserves_original_when_enforced ... ok
+test document::tests::repairs_codepoint_at_target_chunk_size ... ok
+test file_io::tests::empty_file_loads_and_saves ... ok
+test file_io::tests::external_change_before_or_during_save_is_not_overwritten ... ok
+test file_io::tests::file_permissions_survive_replacement ... ok
+test file_io::tests::incomplete_write_cannot_be_reported_as_a_successful_save ... ok
+test file_io::tests::invalid_utf8_nul_and_incomplete_utf8_are_read_only_errors ... ok
+test brackets::tests::large_unicode_windows_and_partial_index_ends_keep_nearby_pairs ... ok
+test file_io::tests::no_op_save_preserves_bom_and_mixed_line_endings_exactly ... ok
+test file_io::tests::preview_is_bounded_and_omits_trailing_partial_character ... ok
+test file_io::tests::removed_destination_is_not_silently_recreated ... ok
+test document::tests::history_is_limited_and_snapshots_have_no_history ... ok
+test file_io::tests::simulated_disk_exhaustion_after_partial_write_retains_original ... ok
+test file_io::tests::symlink_load_preview_and_save_are_rejected ... ok
+test search::tests::find_all_is_non_overlapping_and_utf8_preserving ... ok
+test search::tests::cancelled_search_and_empty_pattern_are_errors ... ok
+
+running 1 test
+test search::tests::finds_across_piece_boundaries ... ok
+test search::tests::forward_backward_and_explicit_bounds ... ok
+test document::tests::oversized_bulk_expansion_is_rejected_before_allocating_output ... ok
+test file_io::tests::interrupted_save_process_keeps_original ... ok
+test search::tests::handles_repeated_prefixes_without_missing_matches ... ok
+test search::tests::replaces_in_snapshot_without_mutating_original ... ok
+test file_io::tests::utf8_across_every_chunk_boundary_is_preserved ... ok
+test syntax::tests::c_preprocessor_hazards_explicitly_fall_back ... ok
+test syntax::tests::escaped_quote_across_checkpoint_does_not_end_string ... ok
+test syntax::tests::json_has_no_comment_syntax ... ok
+test syntax::tests::c_comments_do_not_nest_and_raw_strings_are_multiline ... ok
+test syntax::tests::nested_rust_comments_and_raw_strings ... ok
+test syntax::tests::raw_delimiter_and_escape_can_cross_checkpoint ... ok
+test syntax::tests::recognizes_extensions_without_claiming_unknown_languages ... ok
+test syntax::tests::rust_characters_lifetimes_and_raw_identifiers ... ok
+test syntax::tests::rust_keywords_comments_strings_numbers ... ok
+test syntax::tests::stale_partial_cancelled_and_oversized_indexes_fall_back ... ok
+test syntax::tests::maximum_rust_raw_delimiter_crosses_read_block ... ok
+test syntax::tests::c_line_splice_across_scan_block_is_detected ... ok
+test syntax::tests::state_crosses_checkpoints_and_scan_blocks ... ok
+test vim::tests::empty_buffers_and_line_ends_are_safe ... ok
+test vim::tests::line_operations_preserve_endings_and_register_payload ... ok
+test vim::tests::open_and_paste_plans_preserve_bom_crlf ... ok
+test vim::tests::parser_counts_operators_and_cancellation ... ok
+test vim::tests::parser_modes_and_commands ... ok
+test vim::tests::unicode_bom_crlf_and_horizontal_limits ... ok
+test vim::tests::vertical_movement_uses_scalar_columns ... ok
+test vim::tests::word_motions_and_operator_endpoints ... ok
+test document::tests::bulk_compaction_keeps_utf8_and_newline_indices_valid ... ok
+test vim::tests::arbitrary_offsets_never_split_utf8_crlf_or_bom ... ok
+test search::tests::match_limit_is_an_error_not_a_partial_result ... ok
+test syntax::tests::arbitrary_viewports_match_full_document_highlighting ... ok
+test vim::tests::bounded_work_refuses_long_word_and_large_payload ... ok
+test document::tests::dense_line_checkpoints_are_sparse_shared_and_survive_slices ... ok
+test document::tests::million_match_replacement_streams_to_a_few_chunks_before_commit ... ok
+test document::tests::sequential_typing_coalesces_locally_and_remains_undoable ... ok
+
+test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/document_randomized.rs (target/debug/deps/document_randomized-5a11f4dffbea7485)
+
+running 1 test
+test randomized_chunk_validation_edits_and_undo_roundtrip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/large_file.rs (target/debug/deps/large_file-674d8cb0ae1a0a68)
+
+running 7 tests
+test hundred_megabyte_all_families_open_edit_save ... ignored, opt-in 100 MB real-file fixtures; use --ignored --exact
+test one_gigabyte_open_edit_save ... ignored, writes a real 1,000,000,000-byte fixture; needs about 2 GB free disk
+test ten_megabyte_all_families_open_edit_save ... ignored, opt-in 10 MB real-file fixtures; use --ignored --exact
+test one_megabyte_single_line_open_edit_save ... ok
+test one_megabyte_logs_open_edit_save ... ok
+test fixture_tail_and_streaming_edit_oracle_are_valid ... ok
+test one_megabyte_source_open_edit_save ... ok
+
+test result: ok. 4 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests examples/welcome.rs (target/debug/examples/welcome-fd82b63fee3e1c01)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
++ cargo test --locked --doc
+    Finished `test` profile [unoptimized] target(s) in 0.16s
+   Doc-tests simptxt
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
++ cargo build --locked
+    Finished `dev` profile [unoptimized] target(s) in 0.13s

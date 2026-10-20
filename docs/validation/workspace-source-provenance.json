@@ -1,0 +1,39 @@
+{
+  "date_utc": "2026-10-20",
+  "base_commit": "5a3da9686bdd563064d7a17f3de66436f8fac8f7",
+  "description": "Source hashes cover the validated workspace implementation including the macOS test-fixture correction. The initial implementation tree is retained for comparison; the correction changes tests only, not runtime code or the measured UI.",
+  "sha256": {
+    "Cargo.toml": "a778b59edc56731fcbaa827f5ada246113d96541d79515f582189f2424d8b6a5",
+    "Cargo.lock": "4089b41b12b9661b093a547bd6c6456649eea77d06ff987edfc866c02639709a",
+    "src/app.rs": "90f37cdc39323b4fcc52b4e1ef193dca9bb8b0da9f1adb666f1aeff3f8a09023",
+    "src/app_safety_tests.rs": "03c87038d7fa85bc7851bb60ffa7c8b67cae365f0292bd90b988cdca1139bf94",
+    "src/app_vim.rs": "ea6db9660d5ef299c976a1e603cd5802aae32c75a3760f31c970e8359a2251f0",
+    "src/brackets.rs": "6c740d6d4b5d658e56a144ae398f3c78f13ee241bc97cda1c76087c4cdd3caed",
+    "src/document.rs": "65b329502dcfd004b068aed8cddf6f0406b19f1ba927cc2cb553006ae9a15118",
+    "src/file_io.rs": "62a16ed4bd2c8e558739366afdc7f16103fab10e3860700973909e2c1066d097",
+    "src/headless.rs": "74043547e16a9a10d155822d86a322c7caf81bbe539e4c4fd0bed6ab8bd76748",
+    "src/lib.rs": "f4f3f69c60c326dc30920189fd43a658325ed7d924afcf705034c676ae18a39b",
+    "src/main.rs": "3d3886ab927422f9bab62adc10f4d0397486752cdc4fa0d663752d25a0c6497a",
+    "src/preferences.rs": "ae5263000b76591d41cbdf2d5c856a44beaea207b9cd67f4a7ab441beca88f8b",
+    "src/project_tree.rs": "ea6931e70418eff5f04043a73b7cbb4d0d002d8610c36ace86779cffc4ed37ee",
+    "src/search.rs": "e5d50157ee064faab875cd94b849c3560c66bbb8477ccb29001b0717f4ad1952",
+    "src/syntax.rs": "69d41896a4c01c6600b6e23243715212a967cd4d548234486b67753ff171fbeb",
+    "src/view.rs": "9f54d4b9ba6bcf95bfe7c017dcf7cf4d404535f2f744407c61b862c0c99e7954",
+    "src/vim.rs": "5d8c5515eea8870ec627d19b46dc123f116e96e3d959bcc4b673463294d7ec9d",
+    "src/workspace.rs": "8d8e6a6bae4d5777c74a65c9cb34b6c1789dea2ca30ac3bf638cc382bc070f08",
+    "src/workspace_regression_tests.rs": "47facc4c9201ba9200853170e8fb3d87cd902cf6049090b170ec91332e636369",
+    "tests/document_randomized.rs": "16fd2eb09a33182d7fc082f622ecf3d606ed1daa3404cceef7b3b7772de29969",
+    "tests/large_file.rs": "48aa5693960cbb722ecb0adb3efc48536450bcd6229816766c4df620e6c931b9"
+  },
+  "checks": {
+    "default_features_passed": 173,
+    "default_features_ignored_expensive_opt_ins": 3,
+    "no_default_features_passed": 88,
+    "no_default_features_ignored_expensive_opt_ins": 3,
+    "doctests_present": 0,
+    "format": "pass",
+    "strict_clippy": "pass",
+    "build": "pass"
+  },
+  "initial_implementation_tree": "b74147847ac119e1260e73586b30125bb51e997d"
+}

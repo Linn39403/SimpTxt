@@ -1,0 +1,20 @@
+RUN family=long actual_fixture_bytes=1000000000 trials=1 cache=uncontrolled_generated_fixture measurements=core_not_UI no_percentile_claim=true
+METRIC family=long fixture_bytes=1000000000 case=first_preview_read elapsed_ns=27130 bytes=4096 decimal_MB_per_s=150.977
+METRIC family=long fixture_bytes=1000000000 case=full_load elapsed_ns=1277612503 bytes=1000000000 decimal_MB_per_s=782.710
+METRIC family=long fixture_bytes=1000000000 case=editing_ready_since_open elapsed_ns=1277734666 bytes=1000000000 decimal_MB_per_s=782.635
+METRIC family=long fixture_bytes=1000000000 case=noop_save elapsed_ns=1895968883 bytes=1000000000 decimal_MB_per_s=527.435
+METRIC family=long fixture_bytes=1000000000 case=edit_end elapsed_ns=450927 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=edit_middle elapsed_ns=148183 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=edit_beginning elapsed_ns=105388 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=105839 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=104757 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=undo_one_edit elapsed_ns=104387 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=105208 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=114342 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=redo_one_edit elapsed_ns=127080 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=save_cancellation_acknowledgment elapsed_ns=82048 bytes=0 decimal_MB_per_s=0.000
+METRIC family=long fixture_bytes=1000000000 case=cancelled_save_total elapsed_ns=392930 bytes=524306 decimal_MB_per_s=1334.350
+METRIC family=long fixture_bytes=1000000000 case=edited_save elapsed_ns=265186584 bytes=1000000035 decimal_MB_per_s=3770.930
+METRIC family=long fixture_bytes=1000000000 case=reopen_edited_file elapsed_ns=948712398 bytes=1000000035 decimal_MB_per_s=1054.060
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 6.23s
+PROCESS exit=0 wall_s=6.256 peak_child_rss_kib=979664 user_s=2.315 system_s=3.936

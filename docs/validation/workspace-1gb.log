@@ -1,0 +1,10 @@
+SIMPTXT_UI_PREVIEW first_gpu_frame_ms=176.228
+SIMPTXT_UI_EDITABLE open_to_ready_ms=15612.325
+SIMPTXT_UI_FRAME operation=begin_insert input_to_gpu_ms=26.225
+SIMPTXT_UI_FRAME operation=begin_undo input_to_gpu_ms=10.092
+SIMPTXT_UI_FRAME operation=middle_insert input_to_gpu_ms=26.734
+SIMPTXT_UI_FRAME operation=middle_undo input_to_gpu_ms=11.450
+SIMPTXT_UI_FRAME operation=end_insert input_to_gpu_ms=15.923
+SIMPTXT_UI_FRAME operation=end_undo input_to_gpu_ms=12.060
+SIMPTXT_UI_BENCHMARK_OK input_bytes=1000000000 preview_first_gpu_frame_ms=176.228 editing_ready_ms=15612.325 edit_frames=6 mean_input_to_gpu_ms=17.081 max_input_to_gpu_ms=26.734 input_method=in_process
+SIMPTXT_HEADLESS_OK 1280x800 frames=580 adapter="llvmpipe (LLVM 19.1.7, 256 bits)" backend=Vulkan output=output.png

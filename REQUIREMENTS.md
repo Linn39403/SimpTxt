@@ -1,6 +1,6 @@
 # SimpTxt Requirements
 
-Status: initial v1 requirements. License, implementation language, and UI framework are undecided.
+Status: v1 requirements, not a claim of completed acceptance. The first implementation uses Rust with egui/eframe and wgpu; this is an implementation decision, not a universal requirement. The license remains undecided.
 
 ## 1. Goal and scope
 
@@ -20,7 +20,16 @@ Requirement origins:
 
 ### Non-goals for v1
 
-No IDE features, AI, plugin system, embedded terminal, project-wide indexing, language servers, debugging, or build integration. Do not add feature breadth at the expense of the core file-editing workflow. Tabs, sessions, themes, and other convenience features are not release requirements.
+No IDE features, AI, plugin system, embedded terminal, project-wide indexing, language servers, debugging, or build integration. Do not add feature breadth at the expense of the core file-editing workflow. Session restoration and unrelated convenience features are not release requirements. The follow-on features below were explicitly requested after the first implementation; they do not introduce IDE/project indexing scope.
+
+### Follow-on requirements (user-approved 2026-10-20)
+
+- **S-05 [User]: Multiple files.** Keep opened files in separate tabs with independent edits, undo history, cursor/selection, scroll state, paths, background work, and modified indicators. Switching tabs must not replace content. Warn on unsaved close/quit; duplicate opens must not create divergent buffers for one file.
+- **S-06 [User]: Optional Vim mode.** Offer a clearly labeled, optional Vim-style subset including Normal, Insert, and Visual editing. Document precisely which commands are implemented; unsupported commands must not mutate content or claim full compatibility. Native dialogs and search fields retain normal input behavior.
+- **S-07 [User]: Open Folder.** Provide a collapsible project-file sidebar. List directories lazily and asynchronously, with bounded work and no recursive whole-project scan. Selecting a file opens or focuses its tab. Changing the folder never discards documents. File rename/delete and project indexing remain out of scope.
+- **S-08 [User]: Editor zoom.** Support Ctrl +, Ctrl −, and Ctrl + mouse wheel. **[Derived, agreed]:** Ctrl 0 resets. Zoom must work in Vim modes without typing into or dirtying files; row geometry, caret placement and hit testing must follow the font size.
+- **S-09 [User]: Themes.** Provide dark and light modes, with consistent editor, syntax, caret, selection, gutter, tabs, sidebar and dialog colors. Theme switches must preserve document and editing state.
+- **S-10 [User]: Matching pairs.** Highlight caret-adjacent matching parentheses, brackets and braces with nesting. Use reliable source lexical state to exclude comments/strings; report unknown rather than guessing when syntax or a bounded search budget is insufficient. No automatic delimiter insertion is requested.
 
 ## 2. Core behavior
 
@@ -96,4 +105,6 @@ Also test external modification, save failure, disk exhaustion, interrupted savi
 2. **Core editor:** finish the minimal file workflow, search/replace, supported text behavior, and visible-first correct highlighting.
 3. **Application polish:** keyboard behavior, simple UI, packaging, cross-platform validation, and contributor documentation.
 
-Open decisions: open-source license; implementation language, including Rust versus C++; UI framework; initial syntax languages; supported OS versions; reference hardware; and measured performance/memory budgets. No license or framework is selected by this document.
+Implementation decisions for the current prototype: Rust; egui/eframe with wgpu; a chunked piece-table core and viewport-only rendering. Initial syntax modes are Rust, C/C++, JSON, and plain text, with conservative plain-text fallback for unsupported lexical constructs. See README.md for the implemented scope and current limitations.
+
+Open decisions and acceptance work: open-source license; supported OS versions; reference hardware; and measured performance/memory budgets. Cross-platform builds and the full 20-trial acceptance matrix remain separate validation work; targeted prototype tests do not establish v1 acceptance.
