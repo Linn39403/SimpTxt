@@ -1,312 +1,284 @@
-//! Small, document-independent presentation settings shared by every tab.
-use eframe::egui::{self, Color32, Event, Key, MouseWheelUnit, Vec2};
+//! Small, versioned application preferences. No document contents are stored here.
+use std::{
+    env,
+    fs::{self, File},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+};
 
-pub const DEFAULT_FONT_SIZE: f32 = 15.0;
-pub const MIN_FONT_SIZE: f32 = 9.0;
-pub const MAX_FONT_SIZE: f32 = 36.0;
+const MAX_SETTINGS_BYTES: u64 = 16 * 1024;
+const MAX_FONT_BYTES: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Theme {
-    #[default]
-    Dark,
-    Light,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EditorPreferences {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settings {
+    pub font: String,
     pub font_size: f32,
-    pub theme: Theme,
+    pub dark: bool,
+    pub wrap: bool,
+    pub zoom: f32,
+    pub syntax: bool,
 }
 
-impl Default for EditorPreferences {
+impl Default for Settings {
     fn default() -> Self {
         Self {
-            font_size: DEFAULT_FONT_SIZE,
-            theme: Theme::Dark,
+            font: "Default monospace".into(),
+            font_size: 15.0,
+            dark: false,
+            wrap: true,
+            zoom: 1.0,
+            syntax: true,
         }
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct Palette {
-    pub background: Color32,
-    pub text: Color32,
-    pub muted: Color32,
-    pub accent: Color32,
-    pub current_line: Color32,
-    pub selection: Color32,
-    pub warning: Color32,
-    pub comment: Color32,
-    pub string: Color32,
-    pub number: Color32,
-    pub keyword: Color32,
-}
-
-impl EditorPreferences {
-    pub fn row_height(self) -> f32 {
-        self.font_size + 8.0
+impl Settings {
+    /// Missing, inaccessible, unsupported or malformed preferences use safe defaults.
+    pub fn load() -> Self {
+        Self::config_path().map(Self::load_from).unwrap_or_default()
     }
-
-    pub fn reset_zoom(&mut self) {
-        self.font_size = DEFAULT_FONT_SIZE;
+    pub fn save(&self) -> io::Result<()> {
+        self.save_to(Self::config_path()?)
     }
-
-    pub fn toggle_theme(&mut self) {
-        self.theme = match self.theme {
-            Theme::Dark => Theme::Light,
-            Theme::Light => Theme::Dark,
-        };
-    }
-
-    pub fn palette(self) -> Palette {
-        let rgb = Color32::from_rgb;
-        match self.theme {
-            Theme::Dark => Palette {
-                background: rgb(20, 25, 33),
-                text: rgb(209, 216, 226),
-                muted: rgb(145, 158, 174),
-                accent: rgb(106, 207, 188),
-                current_line: rgb(26, 33, 43),
-                selection: rgb(45, 76, 96),
-                warning: rgb(244, 200, 100),
-                comment: rgb(142, 167, 147),
-                string: rgb(218, 201, 138),
-                number: rgb(197, 167, 222),
-                keyword: rgb(130, 191, 235),
-            },
-            Theme::Light => Palette {
-                background: rgb(250, 251, 253),
-                text: rgb(30, 39, 52),
-                muted: rgb(87, 101, 120),
-                accent: rgb(0, 104, 90),
-                current_line: rgb(237, 242, 247),
-                selection: rgb(191, 218, 242),
-                warning: rgb(140, 74, 0),
-                comment: rgb(65, 105, 76),
-                string: rgb(128, 73, 15),
-                number: rgb(116, 58, 148),
-                keyword: rgb(18, 87, 158),
-            },
-        }
-    }
-
-    pub fn apply_theme(self, ctx: &egui::Context) {
-        ctx.set_theme(match self.theme {
-            Theme::Dark => egui::Theme::Dark,
-            Theme::Light => egui::Theme::Light,
-        });
-        let mut visuals = match self.theme {
-            Theme::Dark => egui::Visuals::dark(),
-            Theme::Light => egui::Visuals::light(),
-        };
-        let palette = self.palette();
-        visuals.panel_fill = palette.background;
-        visuals.selection.bg_fill = palette.selection;
-        visuals.selection.stroke.color = palette.accent;
-        ctx.set_visuals(visuals);
-        // Otherwise egui also applies Ctrl +/- to the entire application.
-        ctx.options_mut(|options| options.zoom_with_keyboard = false);
-    }
-
-    /// Consume editor zoom before widgets, scrolling, and Vim see the events.
-    /// Shortcuts also work while a search field or sidebar owns keyboard focus.
-    pub fn handle_zoom(&mut self, ctx: &egui::Context) -> bool {
-        ctx.options_mut(|options| options.zoom_with_keyboard = false);
-        let old = self.font_size;
-        ctx.input_mut(|input| {
-            let mut shortcut_text = Vec::new();
-            let mut wheel_input = false;
-            input.events.retain(|event| {
-                match event {
-                    Event::Key {
-                        key,
-                        pressed,
-                        modifiers,
-                        ..
-                    } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
-                        let delta = match key {
-                            Key::Plus | Key::Equals => Some(1.0),
-                            Key::Minus => Some(-1.0),
-                            Key::Num0 => Some(0.0),
-                            _ => None,
-                        };
-                        if let Some(delta) = delta {
-                            if *pressed {
-                                shortcut_text.push(*key);
-                                if delta == 0.0 {
-                                    self.reset_zoom();
-                                } else {
-                                    self.font_size = (self.font_size + delta)
-                                        .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-                                }
-                            }
-                            return false;
-                        }
-                    }
-                    Event::MouseWheel {
-                        unit,
-                        delta,
-                        modifiers,
-                        ..
-                    } if (modifiers.ctrl || modifiers.command) && !modifiers.alt => {
-                        let amount = match unit {
-                            MouseWheelUnit::Point => delta.y / 24.0,
-                            MouseWheelUnit::Line => delta.y,
-                            MouseWheelUnit::Page => delta.y * 3.0,
-                        };
-                        if amount.is_finite() {
-                            self.font_size = (self.font_size + amount.clamp(-8.0, 8.0))
-                                .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-                        }
-                        wheel_input = true;
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
+    pub fn config_path() -> io::Result<PathBuf> {
+        #[cfg(target_os = "windows")]
+        let base = env::var_os("APPDATA")
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .filter(|p| !p.is_empty())
+                    .map(|p| PathBuf::from(p).join("AppData").join("Roaming"))
             });
-            if !shortcut_text.is_empty() {
-                // Some integrations report printable shortcut text as well.
-                // Consume only a corresponding text event for each key, not
-                // unrelated text delivered in the same frame as wheel input.
-                input.events.retain(|event| {
-                    let Event::Text(text) = event else {
-                        return true;
-                    };
-                    if let Some(index) = shortcut_text.iter().position(|key| match key {
-                        Key::Plus | Key::Equals => matches!(text.as_str(), "+" | "="),
-                        Key::Minus => text == "-",
-                        Key::Num0 => text == "0",
-                        _ => false,
-                    }) {
-                        shortcut_text.remove(index);
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-            if wheel_input || input.modifiers.ctrl || input.modifiers.command {
-                input.smooth_scroll_delta = Vec2::ZERO;
-            }
-        });
-        self.font_size != old
+        #[cfg(target_os = "macos")]
+        let base = env::var_os("HOME")
+            .filter(|p| !p.is_empty())
+            .map(|p| PathBuf::from(p).join("Library").join("Application Support"));
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let base = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| {
+                env::var_os("HOME")
+                    .filter(|p| !p.is_empty())
+                    .map(|p| PathBuf::from(p).join(".config"))
+            });
+        base.filter(|p| p.is_absolute()).map(|p| p.join("rust-notepad-prototype").join("settings.conf"))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Could not locate a configuration directory; settings remain active for this session."))
     }
+    /// Explicit-path variant for portable callers and isolated tests.
+    pub fn load_from(path: impl AsRef<Path>) -> Self {
+        let read = || -> io::Result<String> {
+            let file = File::open(path)?;
+            if file.metadata()?.len() > MAX_SETTINGS_BYTES {
+                return Err(invalid_settings());
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_SETTINGS_BYTES + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+                return Err(invalid_settings());
+            }
+            String::from_utf8(bytes).map_err(|_| invalid_settings())
+        };
+        read().map(|text| Self::parse(&text)).unwrap_or_default()
+    }
+    pub fn save_to(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(self.serialize().as_bytes())?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
+    }
+    fn parse(text: &str) -> Self {
+        let mut settings = Self::default();
+        // Requiring the first nonempty line avoids partially reading future formats.
+        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+        if lines.next() != Some("version=1") {
+            return settings;
+        }
+        for line in lines {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "font_hex" => {
+                    if let Some(font) = decode_font(value) {
+                        settings.font = font;
+                    }
+                }
+                "font_size" => {
+                    if let Some(value) = bounded_float(value, 8.0, 40.0) {
+                        settings.font_size = value;
+                    }
+                }
+                "zoom" => {
+                    if let Some(value) = bounded_float(value, 0.5, 3.0) {
+                        settings.zoom = value;
+                    }
+                }
+                "dark" => {
+                    if let Ok(value) = value.parse() {
+                        settings.dark = value;
+                    }
+                }
+                "wrap" => {
+                    if let Ok(value) = value.parse() {
+                        settings.wrap = value;
+                    }
+                }
+                "syntax" => {
+                    if let Ok(value) = value.parse() {
+                        settings.syntax = value;
+                    }
+                }
+                _ => {}
+            }
+        }
+        settings
+    }
+    fn serialize(&self) -> String {
+        let defaults = Self::default();
+        let font = if valid_font(&self.font) {
+            &self.font
+        } else {
+            &defaults.font
+        };
+        let font_hex: String = font.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let font_size = if self.font_size.is_finite() && (8.0..=40.0).contains(&self.font_size) {
+            self.font_size
+        } else {
+            defaults.font_size
+        };
+        let zoom = if self.zoom.is_finite() && (0.5..=3.0).contains(&self.zoom) {
+            self.zoom
+        } else {
+            defaults.zoom
+        };
+        format!(
+            "version=1\nfont_hex={font_hex}\nfont_size={font_size}\ndark={}\nwrap={}\nzoom={zoom}\nsyntax={}\n",
+            self.dark, self.wrap, self.syntax
+        )
+    }
+}
+fn invalid_settings() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "Invalid preferences file")
+}
+fn bounded_float(value: &str, min: f32, max: f32) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite() && (min..=max).contains(v))
+}
+fn valid_font(font: &str) -> bool {
+    !font.is_empty() && font.len() <= MAX_FONT_BYTES && !font.contains('\0')
+}
+fn decode_font(hex: &str) -> Option<String> {
+    if hex.len() > MAX_FONT_BYTES * 2 || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect();
+    String::from_utf8(bytes?)
+        .ok()
+        .filter(|font| valid_font(font))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn key(key: Key, shifted: bool) -> Event {
-        Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers {
-                ctrl: true,
-                command: true,
-                shift: shifted,
-                ..Default::default()
-            },
+    #[test]
+    fn missing_and_invalid_files_use_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.conf");
+        assert_eq!(Settings::load_from(&path), Settings::default());
+        for content in [
+            b"garbage".as_slice(),
+            b"version=2\ndark=true\n",
+            b"\xff\xfe",
+        ] {
+            fs::write(&path, content).unwrap();
+            assert_eq!(Settings::load_from(&path), Settings::default());
         }
     }
-
-    fn frame(settings: &mut EditorPreferences, events: Vec<Event>) -> (Vec<Event>, Vec2, f32) {
-        let ctx = egui::Context::default();
-        settings.apply_theme(&ctx);
-        let mut remaining = Vec::new();
-        let mut scroll = Vec2::ZERO;
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                events,
-                ..Default::default()
-            },
-            |ui| {
-                settings.handle_zoom(ui.ctx());
-                remaining = ui.input(|i| i.events.clone());
-                scroll = ui.input(|i| i.smooth_scroll_delta);
-            },
-        );
-        output.textures_delta.clear();
-        (remaining, scroll, ctx.zoom_factor())
-    }
-
     #[test]
-    fn keyboard_zoom_consumes_shortcut_text_without_global_zoom() {
-        let mut settings = EditorPreferences::default();
-        for k in [Key::Equals, Key::Plus] {
-            let (events, _, ui_zoom) =
-                frame(&mut settings, vec![key(k, true), Event::Text("+".into())]);
-            assert!(events.is_empty());
-            assert_eq!(ui_zoom, 1.0);
-        }
-        assert_eq!(settings.font_size, DEFAULT_FONT_SIZE + 2.0);
-        frame(&mut settings, vec![key(Key::Minus, false)]);
-        assert_eq!(settings.font_size, DEFAULT_FONT_SIZE + 1.0);
-        frame(&mut settings, vec![key(Key::Num0, false)]);
-        assert_eq!(settings.font_size, DEFAULT_FONT_SIZE);
-    }
-
-    #[test]
-    fn zoom_clamps_repeated_commands_and_retains_unrelated_input() {
-        let mut settings = EditorPreferences::default();
-        frame(
-            &mut settings,
-            (0..100).map(|_| key(Key::Plus, false)).collect(),
-        );
-        assert_eq!(settings.font_size, MAX_FONT_SIZE);
-        frame(
-            &mut settings,
-            (0..100).map(|_| key(Key::Minus, false)).collect(),
-        );
-        assert_eq!(settings.font_size, MIN_FONT_SIZE);
-        let (events, _, _) = frame(&mut settings, vec![Event::Text("ordinary text".into())]);
-        assert!(matches!(&events[..], [Event::Text(text)] if text == "ordinary text"));
-        let (events, _, _) = frame(
-            &mut settings,
-            vec![key(Key::Plus, false), Event::Text("-".into())],
-        );
-        assert!(matches!(&events[..], [Event::Text(text)] if text == "-"));
-    }
-
-    #[test]
-    fn control_wheel_zooms_both_directions_without_scrolling() {
-        let mut settings = EditorPreferences::default();
-        for delta in [2.0, -1.0] {
-            let (events, scroll, _) = frame(
-                &mut settings,
-                vec![Event::MouseWheel {
-                    unit: MouseWheelUnit::Line,
-                    delta: Vec2::new(0.0, delta),
-                    phase: egui::TouchPhase::Move,
-                    modifiers: egui::Modifiers::CTRL,
-                }],
+    fn malformed_and_out_of_range_fields_keep_defaults() {
+        let text = "version=1\nfont_hex=not hex\nfont_size=900\nzoom=NaN\ndark=yes\nwrap=123\nsyntax=truthy\nunknown=value\nno equals sign";
+        assert_eq!(Settings::parse(text), Settings::default());
+        for value in ["NaN", "inf", "-inf", "0", "-1", "41", "3e38"] {
+            assert_eq!(
+                Settings::parse(&format!("version=1\nfont_size={value}\n")).font_size,
+                15.0
             );
-            assert!(events.is_empty());
-            assert_eq!(scroll, Vec2::ZERO);
         }
-        assert_eq!(settings.font_size, DEFAULT_FONT_SIZE + 1.0);
+        assert!(Settings::parse("version=1\nfont_size=bad\ndark=true").dark);
     }
-
     #[test]
-    fn both_palettes_and_row_geometry_change_without_ui_scaling() {
-        let ctx = egui::Context::default();
-        let mut settings = EditorPreferences::default();
-        let dark = settings.palette();
-        settings.toggle_theme();
-        settings.apply_theme(&ctx);
-        assert!(!ctx.global_style().visuals.dark_mode);
-        assert_eq!(ctx.theme(), egui::Theme::Light);
-        assert_ne!(dark.background, settings.palette().background);
-        assert_ne!(dark.keyword, settings.palette().keyword);
-        settings.font_size = 30.0;
-        assert_eq!(settings.row_height(), 38.0);
-        settings.toggle_theme();
-        settings.apply_theme(&ctx);
-        assert!(ctx.global_style().visuals.dark_mode);
-        assert_eq!(ctx.theme(), egui::Theme::Dark);
-        assert_eq!(ctx.zoom_factor(), 1.0);
+    fn settings_roundtrip_unicode_and_delimiters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("settings.conf");
+        let settings = Settings {
+            font: "日本語 Font=Mono\nwith\rdelimiters 🦀".into(),
+            font_size: 18.5,
+            dark: true,
+            wrap: false,
+            zoom: 1.5,
+            syntax: false,
+        };
+        settings.save_to(&path).unwrap();
+        assert_eq!(Settings::load_from(&path), settings);
+        Settings::default().save_to(&path).unwrap();
+        assert_eq!(Settings::load_from(&path), Settings::default());
+    }
+    #[test]
+    fn huge_files_and_bad_font_encodings_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.conf");
+        File::create(&path)
+            .unwrap()
+            .set_len(MAX_SETTINGS_BYTES + 1)
+            .unwrap();
+        assert_eq!(Settings::load_from(&path), Settings::default());
+        for hex in ["", "0", "ff", "00", "xx", "é"] {
+            assert_eq!(
+                Settings::parse(&format!("version=1\nfont_hex={hex}")).font,
+                Settings::default().font
+            );
+        }
+    }
+    #[test]
+    fn invalid_in_memory_values_are_safely_serialized() {
+        let settings = Settings {
+            font_size: f32::NAN,
+            zoom: f32::INFINITY,
+            font: String::new(),
+            ..Settings::default()
+        };
+        assert_eq!(Settings::parse(&settings.serialize()), Settings::default());
+    }
+    #[test]
+    fn save_errors_are_reported_and_unrelated_files_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("not-a-directory");
+        fs::write(&existing, "keep me").unwrap();
+        assert!(
+            Settings::default()
+                .save_to(existing.join("settings.conf"))
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(existing).unwrap(), "keep me");
     }
 }

@@ -1,3 +1,4 @@
-/target/
-/benchmark-artifacts/
-*.simptxt-tmp
+/target
+/artifacts/
+__pycache__/
+*.pyc

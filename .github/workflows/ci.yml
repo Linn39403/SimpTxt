@@ -9,11 +9,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      large_file:
-        description: Run the slower, real 1 GB file regression on all three platforms
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -61,9 +56,9 @@ jobs:
             ~/.cargo/git/db
             ~/.cargo/git/checkouts
             target
-          key: cargo-${{ matrix.os }}-${{ runner.arch }}-1.95.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: notepad-cargo-${{ matrix.os }}-${{ runner.arch }}-1.95.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            cargo-${{ matrix.os }}-${{ runner.arch }}-1.95.0-
+            notepad-cargo-${{ matrix.os }}-${{ runner.arch }}-1.95.0-
 
       - name: Install Linux desktop and software rendering libraries
         if: runner.os == 'Linux'
@@ -80,73 +75,29 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Lint all targets
+      - name: Lint default targets
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Run unit and integration tests
+      - name: Lint all features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test default targets
         run: cargo test --locked --all-targets
 
-      - name: Test the core without desktop dependencies
-        run: cargo test --locked --no-default-features --all-targets
+      - name: Test all features
+        run: cargo test --locked --all-targets --all-features
 
-      - name: Run documentation tests
-        run: cargo test --locked --doc
-
-      - name: Build the desktop executable
+      - name: Build the default desktop executable
         run: cargo build --locked
 
-      # These checks launch the real native window/event loop. They are startup
-      # and in-process UI checks, not OS-level keyboard/mouse automation.
-      - name: Smoke-test the native window (Linux)
+      # This captures production widgets offscreen, not an OS window/event loop.
+      - name: Capture production UI with software Vulkan (Linux)
         if: runner.os == 'Linux'
-        timeout-minutes: 2
+        timeout-minutes: 5
         env:
           WGPU_BACKEND: vulkan
         run: |
-          export XDG_RUNTIME_DIR="$RUNNER_TEMP/simptxt-runtime"
-          mkdir -p "$XDG_RUNTIME_DIR"
-          chmod 700 "$XDG_RUNTIME_DIR"
-          # Select Mesa's CPU Vulkan driver instead of relying on a hosted GPU.
           export VK_DRIVER_FILES
           VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
           test -n "$VK_DRIVER_FILES"
-          unset WAYLAND_DISPLAY
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" \
-            cargo run --locked -- --smoke-test
-
-      - name: Smoke-test the native window (Windows)
-        if: runner.os == 'Windows'
-        timeout-minutes: 2
-        env:
-          WGPU_BACKEND: dx12
-        run: cargo run --locked -- --smoke-test
-
-      - name: Smoke-test the native window (macOS)
-        if: runner.os == 'macOS'
-        timeout-minutes: 2
-        env:
-          WGPU_BACKEND: metal
-        run: cargo run --locked -- --smoke-test
-
-  large-file:
-    name: Real 1 GB regression (${{ matrix.os }})
-    if: github.event_name == 'workflow_dispatch' && inputs.large_file
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
-    steps:
-      - name: Check out source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-
-      - name: Install Rust 1.95.0
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: 1.95.0
-
-      - name: Test a real 1 GB file in release mode
-        run: cargo test --locked --release --no-default-features --test large_file -- --ignored --nocapture
+          bash tests/capture.sh

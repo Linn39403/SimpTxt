@@ -1,39 +1,25 @@
 [package]
-name = "simptxt"
+name = "rust-notepad-prototype"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
 publish = false
-
 [features]
-default = ["desktop"]
-desktop = ["dep:eframe", "dep:rfd", "dep:image", "dep:pollster", "dep:same-file"]
+default = ["native-glow"]
+native-glow = ["eframe/glow"]
+headless-capture = ["eframe/wgpu", "dep:image", "dep:pollster"]
 
 [dependencies]
-memchr = "2.8"
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "x11", "wayland"] }
+rfd = "0.17.2"
 tempfile = "3.27"
-eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"], optional = true }
-rfd = { version = "0.17.2", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 pollster = { version = "0.4", optional = true }
-same-file = { version = "1.0.6", optional = true }
-
-[[bin]]
-name = "simptxt"
-path = "src/main.rs"
-required-features = ["desktop"]
-
 [profile.dev]
 debug = 0
 incremental = false
-
-[profile.dev.package.simptxt]
-opt-level = 1
-
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
-
 [lints.rust]
 unsafe_code = "forbid"
